@@ -1,0 +1,35 @@
+[project]
+name = "video-test"
+version = "0.1.0"
+description = "GPU-accelerated vehicle and Chinese license-plate recognition"
+requires-python = "==3.11.*"
+dependencies = [
+    "numpy>=1.26,<3",
+    "opencv-python>=4.10,<5",
+    "pillow>=10,<13",
+    "pyqt6>=6.8,<7",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "ultralytics==8.4.92",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<10",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.uv]
+package = false
+cache-dir = ".uv-cache"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

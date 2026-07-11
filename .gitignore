@@ -1,0 +1,59 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments and local package caches
+.venv/
+venv/
+env/
+.uv-cache/
+pip-wheel-metadata/
+
+# Packaging and build output
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Runtime output
+*.log
+logs/
+runs/
+result/
+result_*/
+output/
+outputs/
+screenshot_*.jpg
+
+# Local environment variables
+.env
+.env.*
+!.env.example
+
+# Editors and local tooling
+.idea/
+.vscode/
+*.code-workspace
+.claude/settings.local.json
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+~$*
+/nul

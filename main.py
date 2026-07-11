@@ -21,12 +21,14 @@ from PyQt6.QtWidgets import (
     QComboBox, QPushButton, QLabel, QGroupBox, QStatusBar, QFrame,
     QCheckBox, QDoubleSpinBox, QSpinBox, QFileDialog, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter,
-    QScrollArea, QMessageBox, QTabWidget, QTextEdit,
+    QScrollArea, QMessageBox, QTabWidget, QTextEdit, QStyle,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread, QMutex
 from PyQt6.QtGui import QImage, QPixmap, QFont, QColor, QBrush
 
 from detection_processor import DetectionProcessor, DetectionResult, HAS_YOLO
+from traffic_map import TrafficMapModel
+from traffic_map_widget import TrafficMapPanel
 from whitelist_manager import WhitelistManager, WhitelistEntry
 
 
@@ -52,6 +54,9 @@ STREAM_SOURCES = {
 DEFAULT_WHITELIST_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "whitelist.json"
 )
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_TRAFFIC_MAP_FILE = os.path.join(PROJECT_DIR, "traffic_map.json")
+SANDBOX_MAP_IMAGE = os.path.join(PROJECT_DIR, "sandpan", "沙盘平面图2.png")
 
 
 # ============================================================
@@ -67,7 +72,7 @@ class VideoCaptureThread(QThread):
     - QMutex 保护共享标志的读写
     """
     frame_ready = pyqtSignal(object)                  # 发送解码/标注后的帧 (numpy array)
-    detection_results_ready = pyqtSignal(list)        # 发送检测结果列表
+    detection_results_ready = pyqtSignal(str, list)   # 摄像头名称 + 检测结果
     connection_status = pyqtSignal(bool, str)         # 连接状态 + 消息
     detection_status = pyqtSignal(str)                 # 检测模块状态消息
 
@@ -75,7 +80,9 @@ class VideoCaptureThread(QThread):
         super().__init__(parent)
         self._mutex = QMutex()
         self._running = False
+        self._paused = False
         self._pending_url = ""           # 非空表示需要切换源
+        self._pending_source_name = ""
 
         # 检测相关
         self._detection_enabled = False
@@ -98,11 +105,26 @@ class VideoCaptureThread(QThread):
 
     # ---- 主线程调用（线程安全） ----
 
-    def set_url(self, url: str):
+    def set_url(self, url: str, source_name: str = ""):
         """请求切换到新的视频源"""
         self._mutex.lock()
         self._pending_url = url
+        self._pending_source_name = source_name
+        self._paused = False
         self._mutex.unlock()
+
+    def set_paused(self, paused: bool):
+        """暂停或继续视频读取与检测处理。"""
+        self._mutex.lock()
+        self._paused = bool(paused)
+        self._mutex.unlock()
+
+    def is_paused(self) -> bool:
+        """返回当前暂停状态。"""
+        self._mutex.lock()
+        paused = self._paused
+        self._mutex.unlock()
+        return paused
 
     def set_detection_enabled(self, enabled: bool):
         """启用/禁用检测"""
@@ -145,7 +167,9 @@ class VideoCaptureThread(QThread):
         """请求停止线程"""
         self._mutex.lock()
         self._running = False
+        self._paused = False
         self._pending_url = ""
+        self._pending_source_name = ""
         self._mutex.unlock()
         self.wait(8000)
 
@@ -192,13 +216,15 @@ class VideoCaptureThread(QThread):
 
         self._mutex.unlock()
 
-    def _get_pending_url(self) -> str:
+    def _get_pending_source(self):
         """取出待切换的 URL 并清空"""
         self._mutex.lock()
         url = self._pending_url
+        source_name = self._pending_source_name
         self._pending_url = ""
+        self._pending_source_name = ""
         self._mutex.unlock()
-        return url
+        return url, source_name
 
     def _is_running(self) -> bool:
         self._mutex.lock()
@@ -223,6 +249,7 @@ class VideoCaptureThread(QThread):
 
         cap = None
         current_url = ""
+        current_source_name = ""
         is_local = False
         video_fps = 0.0
 
@@ -236,12 +263,13 @@ class VideoCaptureThread(QThread):
                 self._init_detection_processor()
 
             # ---- 检查是否有待切换的 URL ----
-            new_url = self._get_pending_url()
+            new_url, new_source_name = self._get_pending_source()
             if new_url:
                 if cap is not None:
                     cap.release()
                     cap = None
                 current_url = new_url
+                current_source_name = new_source_name or os.path.basename(new_url)
                 is_local = self._is_local_file(current_url)
                 cap = self._open_capture(current_url)
                 if cap is not None and is_local:
@@ -257,6 +285,11 @@ class VideoCaptureThread(QThread):
             # ---- 无采集器时短暂休眠 ----
             if cap is None:
                 self.msleep(100)
+                continue
+
+            # 暂停时保留采集器和当前帧，不再读取、检测或发射新帧。
+            if self.is_paused():
+                self.msleep(50)
                 continue
 
             # ---- 读取一帧 ----
@@ -294,9 +327,11 @@ class VideoCaptureThread(QThread):
                     and self._frame_count % self._detect_interval == 0):
 
                 try:
-                    annotated, self._last_results = self._processor.process(frame)
+                    annotated, self._last_results = self._processor.process(
+                        frame, camera_id=current_source_name
+                    )
                     # 发射检测结果到 UI 线程
-                    self.detection_results_ready.emit(self._last_results)
+                    self.detection_results_ready.emit(current_source_name, self._last_results)
                 except Exception as e:
                     self.detection_status.emit(f"检测异常: {e}")
                     annotated = frame
@@ -360,7 +395,8 @@ class VideoCaptureThread(QThread):
             else:
                 color = COLOR_BLUE
 
-            label = f"{r.vehicle_class_cn} {r.yolo_confidence:.0%}"
+            track_label = f"#{r.track_id} " if r.track_id >= 0 else ""
+            label = f"{track_label}{r.vehicle_class_cn} {r.yolo_confidence:.0%}"
             draw_vehicle_box(annotated, r.vehicle_bbox, label, color)
 
             if r.has_plate:
@@ -783,6 +819,18 @@ class MainWindow(QMainWindow):
         self.resize(1600, 900)
 
         self._current_frame = None
+        self._current_source_name = ""
+        self._current_source_url = ""
+        self._current_display_name = ""
+        self._video_paused = False
+
+        # ---- 道路拓扑、摄像头与实时轨迹 ----
+        self._traffic_model = TrafficMapModel(
+            DEFAULT_TRAFFIC_MAP_FILE,
+            STREAM_SOURCES.keys(),
+        )
+        if not os.path.exists(DEFAULT_TRAFFIC_MAP_FILE):
+            self._traffic_model.save()
 
         # ---- 白名单管理器 ----
         self._whitelist_manager = WhitelistManager()
@@ -866,9 +914,27 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right_widget)
         splitter.setSizes([1200, 320])
 
+        monitor_page = QWidget()
+        monitor_layout = QVBoxLayout(monitor_page)
+        monitor_layout.setContentsMargins(0, 0, 0, 0)
+        monitor_layout.addWidget(splitter)
+
+        self._traffic_panel = TrafficMapPanel(
+            self._traffic_model,
+            SANDBOX_MAP_IMAGE,
+            STREAM_SOURCES.keys(),
+            self,
+        )
+        self._traffic_panel.status_message.connect(self._statusbar.showMessage)
+
+        self._main_tabs = QTabWidget()
+        self._main_tabs.setFont(QFont("Microsoft YaHei", 10))
+        self._main_tabs.addTab(monitor_page, "视频监控")
+        self._main_tabs.addTab(self._traffic_panel, "道路态势")
+
         root_layout = QVBoxLayout(central)
         root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.addWidget(splitter)
+        root_layout.addWidget(self._main_tabs)
 
     def _build_control_bar(self):
         """构建顶部控制栏"""
@@ -891,6 +957,17 @@ class MainWindow(QMainWindow):
         self._btn_play.setFont(QFont("Microsoft YaHei", 10))
         self._btn_play.clicked.connect(self._on_play_clicked)
         layout.addWidget(self._btn_play)
+
+        self._btn_pause = QPushButton()
+        self._btn_pause.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause)
+        )
+        self._btn_pause.setFixedSize(34, 34)
+        self._btn_pause.setToolTip("暂停视频")
+        self._btn_pause.setAccessibleName("暂停视频")
+        self._btn_pause.setEnabled(False)
+        self._btn_pause.clicked.connect(self._on_pause_clicked)
+        layout.addWidget(self._btn_pause)
 
         # 本地视频
         self._btn_local = QPushButton("📁 本地视频")
@@ -1042,17 +1119,52 @@ class MainWindow(QMainWindow):
             "视频文件 (*.mp4 *.avi *.mov *.mkv *.flv *.wmv);;所有文件 (*)"
         )
         if path:
-            self._start_stream(path)
+            self._start_stream(path, source_name=self._combo.currentText())
 
-    def _start_stream(self, url: str):
+    def _start_stream(self, url: str, source_name: str = ""):
         """通知采集线程切换到新的视频源"""
         if os.path.exists(url):
-            name = os.path.basename(url)
+            display_name = os.path.basename(url)
+            camera_name = source_name or self._combo.currentText()
         else:
-            name = self._combo.currentText()
-        self._statusbar.showMessage(f"正在连接 {name} ...")
+            camera_name = source_name or self._combo.currentText()
+            display_name = camera_name
+        self._statusbar.showMessage(f"正在连接 {display_name} ...")
         self._results_panel.clear_results()
-        self._thread.set_url(url)
+        self._current_source_name = camera_name
+        self._current_source_url = url
+        self._current_display_name = display_name
+        self._set_video_paused(False)
+        self._btn_pause.setEnabled(True)
+        self._traffic_panel.set_active_camera(camera_name)
+        self._thread.set_url(url, camera_name)
+
+    def _on_pause_clicked(self):
+        """暂停或继续当前视频。"""
+        if not self._current_source_url:
+            self._statusbar.showMessage("暂无正在播放的视频")
+            return
+        self._set_video_paused(not self._video_paused, show_status=True)
+
+    def _set_video_paused(self, paused: bool, show_status: bool = False):
+        self._video_paused = bool(paused)
+        self._thread.set_paused(self._video_paused)
+        if self._video_paused:
+            self._btn_pause.setIcon(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+            )
+            self._btn_pause.setToolTip("继续播放")
+            self._btn_pause.setAccessibleName("继续播放")
+            if show_status:
+                self._statusbar.showMessage(f"视频已暂停: {self._current_display_name}")
+        else:
+            self._btn_pause.setIcon(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause)
+            )
+            self._btn_pause.setToolTip("暂停视频")
+            self._btn_pause.setAccessibleName("暂停视频")
+            if show_status:
+                self._statusbar.showMessage(f"视频继续播放: {self._current_display_name}")
 
     def _on_frame(self, frame):
         """收到帧，刷新显示"""
@@ -1095,9 +1207,16 @@ class MainWindow(QMainWindow):
         """检测间隔变更"""
         self._thread.set_detect_interval(value)
 
-    def _on_detection_results(self, results: List[DetectionResult]):
+    def _on_detection_results(self, camera_id: str, results: List[DetectionResult]):
         """收到检测结果"""
         self._results_panel.update_results(results)
+        if self._current_frame is not None and camera_id in STREAM_SOURCES:
+            height, width = self._current_frame.shape[:2]
+            self._traffic_panel.update_detections(
+                camera_id,
+                results,
+                (width, height),
+            )
 
     def _on_detection_status(self, msg: str):
         """检测模块状态消息"""
@@ -1136,6 +1255,7 @@ class MainWindow(QMainWindow):
         # 退出前保存白名单
         if self._whitelist_manager.count > 0:
             self._whitelist_manager.save(DEFAULT_WHITELIST_FILE)
+        self._traffic_model.save()
         super().closeEvent(event)
 
     # ---------- 样式 ----------

@@ -4,6 +4,7 @@
 """
 import cv2
 import numpy as np
+import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -24,6 +25,9 @@ class DetectionResult:
     vehicle_class: str                        # car / motorcycle / bus / truck
     vehicle_class_cn: str                     # 中文类别名
     yolo_confidence: float                    # YOLO 检测置信度
+    track_id: int = -1                        # 当前摄像头内的 ByteTrack ID
+    camera_id: str = ""                       # 视频源/摄像头名称
+    timestamp: float = 0.0                    # 检测时间戳
 
     # 车牌信息
     plate_text: str = ""                      # 车牌号码
@@ -249,6 +253,7 @@ class DetectionProcessor:
     def process(
         self,
         frame: np.ndarray,
+        camera_id: str = "",
     ) -> Tuple[np.ndarray, List[DetectionResult]]:
         """
         对一帧图像执行完整的检测管线
@@ -269,7 +274,7 @@ class DetectionProcessor:
         h, w = annotated.shape[:2]
 
         # ---- Step 1: YOLO 车辆检测 ----
-        vehicles = self.vehicle_detector.detect(frame)
+        vehicles = self.vehicle_detector.detect(frame, tracker_key=camera_id or "default")
         self.total_vehicles_detected += len(vehicles)
 
         # ---- Step 2: 整帧只运行一次车牌模型，再按空间位置关联车辆 ----
@@ -282,6 +287,9 @@ class DetectionProcessor:
                 vehicle_class=vehicle.class_name,
                 vehicle_class_cn=vehicle.class_name_cn,
                 yolo_confidence=vehicle.confidence,
+                track_id=vehicle.track_id,
+                camera_id=camera_id,
+                timestamp=time.time(),
             )
 
             candidates = [
@@ -311,7 +319,8 @@ class DetectionProcessor:
                 color = COLOR_BLUE
 
             # 绘制车辆检测框
-            label = f"{result.vehicle_class_cn} {result.yolo_confidence:.0%}"
+            track_label = f"#{result.track_id} " if result.track_id >= 0 else ""
+            label = f"{track_label}{result.vehicle_class_cn} {result.yolo_confidence:.0%}"
             draw_vehicle_box(annotated, result.vehicle_bbox, label, color)
 
             # 绘制车牌信息
@@ -337,6 +346,11 @@ class DetectionProcessor:
 
         self.total_frames_processed += 1
         return annotated, results
+
+    def reset_tracking(self):
+        """Reset camera-local tracking without reloading inference weights."""
+        if self.vehicle_detector:
+            self.vehicle_detector.reset_tracking()
 
     @staticmethod
     def _plate_belongs_to_vehicle(

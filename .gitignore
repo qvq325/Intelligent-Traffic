@@ -4,9 +4,15 @@ __pycache__/
 *$py.class
 .pytest_cache/
 .mypy_cache/
+.pyre/
+.pytype/
 .ruff_cache/
+.hypothesis/
+.tox/
+.nox/
 .coverage
 .coverage.*
+coverage.xml
 htmlcov/
 
 # Virtual environments and local package caches
@@ -25,12 +31,14 @@ dist/
 # Runtime output
 *.log
 logs/
+error/
 runs/
 result/
 result_*/
 output/
 outputs/
 screenshot_*.jpg
+runtime/
 
 # Local environment variables
 .env
@@ -57,3 +65,4 @@ ehthumbs.db
 *~
 ~$*
 /nul
+/.gitnexus/

@@ -1,0 +1,79 @@
+const JSON_HEADERS = { "Content-Type": "application/json" };
+
+async function request(path, options = {}) {
+  const response = await fetch(path, {
+    cache: "no-store",
+    ...options,
+  });
+
+  if (!response.ok) {
+    let message = `请求失败 (${response.status})`;
+    try {
+      const payload = await response.json();
+      if (typeof payload.detail === "string") {
+        message = payload.detail;
+      } else if (Array.isArray(payload.detail) && payload.detail[0]?.msg) {
+        message = payload.detail[0].msg;
+      }
+    } catch {
+      // Keep the HTTP fallback message.
+    }
+    throw new Error(message);
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  return contentType.includes("application/json") ? response.json() : response;
+}
+
+function json(method, body) {
+  return {
+    method,
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  };
+}
+
+export const api = {
+  health: () => request("/api/health"),
+  system: () => request("/api/system"),
+  streamStatus: () => request("/api/stream/status"),
+  selectStream: (sourceId) => request("/api/stream/select", json("POST", { source_id: sourceId })),
+  pauseStream: (paused) => request("/api/stream/pause", json("POST", { paused })),
+  stopStream: () => request("/api/stream/stop", { method: "POST" }),
+  updateDetection: (settings) => request("/api/detection/settings", json("PUT", settings)),
+
+  uploadVideo: (file, cameraId) => {
+    const form = new FormData();
+    form.append("file", file);
+    const query = cameraId ? `?camera_id=${encodeURIComponent(cameraId)}` : "";
+    return request(`/api/stream/upload${query}`, { method: "POST", body: form });
+  },
+
+  whitelist: () => request("/api/whitelist"),
+  saveWhitelist: (entry) => request("/api/whitelist", json("POST", entry)),
+  deleteWhitelist: (plate) => request(`/api/whitelist/${encodeURIComponent(plate)}`, { method: "DELETE" }),
+  clearWhitelist: () => request("/api/whitelist", { method: "DELETE" }),
+  setWhitelistEnabled: (enabled) => request("/api/whitelist/enabled", json("PATCH", { enabled })),
+
+  map: () => request("/api/map"),
+  updateCamera: (cameraId, camera) => request(
+    `/api/map/cameras/${encodeURIComponent(cameraId)}`,
+    json("PUT", camera),
+  ),
+  createSegment: (segment) => request("/api/map/segments", json("POST", segment)),
+  updateSegment: (segmentId, segment) => request(
+    `/api/map/segments/${encodeURIComponent(segmentId)}`,
+    json("PUT", segment),
+  ),
+  deleteSegment: (segmentId) => request(
+    `/api/map/segments/${encodeURIComponent(segmentId)}`,
+    { method: "DELETE" },
+  ),
+  resetMap: () => request("/api/map/reset-runtime", { method: "POST" }),
+
+  uploadMap: (file) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request("/api/map/image", { method: "POST", body: form });
+  },
+};

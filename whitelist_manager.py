@@ -5,6 +5,7 @@
 import json
 import os
 import re
+from threading import RLock
 from dataclasses import dataclass, field
 from typing import List, Set, Dict, Optional, Tuple
 
@@ -43,6 +44,7 @@ class WhitelistManager:
     """
 
     def __init__(self):
+        self._lock = RLock()
         self._entries: Dict[str, WhitelistEntry] = {}  # plate -> entry（用于精确匹配）
         self._prefix_set: Set[str] = set()              # 前缀白名单
         self._enabled = True                            # 白名单功能开关
@@ -81,18 +83,19 @@ class WhitelistManager:
             return 0
 
         count = 0
-        for item in data:
-            plate = item.get("plate", "").strip().upper()
-            if plate:
-                entry = WhitelistEntry(
-                    plate=plate,
-                    note=item.get("note", ""),
-                    added_at=item.get("added_at", ""),
-                )
-                self._entries[plate] = entry
-                count += 1
-
-        self._rebuild_prefix_set()
+        with self._lock:
+            self._entries.clear()
+            for item in data:
+                plate = item.get("plate", "").strip().upper()
+                if plate:
+                    entry = WhitelistEntry(
+                        plate=plate,
+                        note=item.get("note", ""),
+                        added_at=item.get("added_at", ""),
+                    )
+                    self._entries[plate] = entry
+                    count += 1
+            self._rebuild_prefix_set()
         print(f"[Whitelist] 已加载 {count} 条白名单记录")
         return count
 
@@ -106,13 +109,15 @@ class WhitelistManager:
         Returns:
             是否保存成功
         """
-        data = []
-        for entry in self._entries.values():
-            data.append({
-                "plate": entry.plate,
-                "note": entry.note,
-                "added_at": entry.added_at,
-            })
+        with self._lock:
+            data = [
+                {
+                    "plate": entry.plate,
+                    "note": entry.note,
+                    "added_at": entry.added_at,
+                }
+                for entry in self._entries.values()
+            ]
 
         try:
             with open(filepath, "w", encoding="utf-8") as f:
@@ -140,20 +145,20 @@ class WhitelistManager:
         if not plate:
             return False
 
-        if plate in self._entries:
-            # 更新备注
-            self._entries[plate].note = note
-            return False
+        with self._lock:
+            if plate in self._entries:
+                self._entries[plate].note = note
+                return False
 
-        from datetime import datetime
-        entry = WhitelistEntry(
-            plate=plate,
-            note=note,
-            added_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        )
-        self._entries[plate] = entry
-        self._rebuild_prefix_set()
-        return True
+            from datetime import datetime
+            entry = WhitelistEntry(
+                plate=plate,
+                note=note,
+                added_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            self._entries[plate] = entry
+            self._rebuild_prefix_set()
+            return True
 
     def remove(self, plate: str) -> bool:
         """
@@ -166,38 +171,45 @@ class WhitelistManager:
             是否成功移除
         """
         plate = plate.strip().upper()
-        if plate in self._entries:
-            del self._entries[plate]
-            self._rebuild_prefix_set()
-            return True
-        return False
+        with self._lock:
+            if plate in self._entries:
+                del self._entries[plate]
+                self._rebuild_prefix_set()
+                return True
+            return False
 
     def clear(self):
         """清空白名单"""
-        self._entries.clear()
-        self._prefix_set.clear()
+        with self._lock:
+            self._entries.clear()
+            self._prefix_set.clear()
 
     # ---- 查询 ----
 
     def get_all(self) -> List[WhitelistEntry]:
         """获取所有白名单条目"""
-        return list(self._entries.values())
+        with self._lock:
+            return list(self._entries.values())
 
     def get(self, plate: str) -> Optional[WhitelistEntry]:
         """根据车牌号获取白名单条目"""
-        return self._entries.get(plate.strip().upper())
+        with self._lock:
+            return self._entries.get(plate.strip().upper())
 
     @property
     def count(self) -> int:
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
     @property
     def enabled(self) -> bool:
-        return self._enabled
+        with self._lock:
+            return self._enabled
 
     @enabled.setter
     def enabled(self, value: bool):
-        self._enabled = value
+        with self._lock:
+            self._enabled = bool(value)
 
     # ---- 匹配规则 ----
 
@@ -216,43 +228,45 @@ class WhitelistManager:
         Returns:
             MatchResult 对象
         """
-        if not self._enabled:
-            return MatchResult(matched=False, plate=plate, match_rule="白名单功能未启用")
+        with self._lock:
+            if not self._enabled:
+                return MatchResult(
+                    matched=False,
+                    plate=plate,
+                    match_rule="白名单功能未启用",
+                )
 
-        plate = plate.strip().upper()
-        if not plate:
-            return MatchResult(matched=False, plate=plate, match_rule="无效车牌")
+            plate = plate.strip().upper()
+            if not plate:
+                return MatchResult(matched=False, plate=plate, match_rule="无效车牌")
 
-        # 规则1: 精确匹配
-        if plate in self._entries:
-            return MatchResult(
-                matched=True,
-                plate=plate,
-                matched_entry=self._entries[plate],
-                match_rule="精确匹配",
-            )
-
-        # 规则2: 前缀匹配
-        for prefix in sorted(self._prefix_set, key=len, reverse=True):
-            if plate.startswith(prefix):
+            if plate in self._entries:
                 return MatchResult(
                     matched=True,
                     plate=plate,
-                    match_rule=f"前缀匹配: {prefix}*",
+                    matched_entry=self._entries[plate],
+                    match_rule="精确匹配",
                 )
 
-        # 规则3: 归一化匹配（去除空格、-、· 等分隔符）
-        normalized = self._normalize(plate)
-        for entry_plate, entry in self._entries.items():
-            if self._normalize(entry_plate) == normalized:
-                return MatchResult(
-                    matched=True,
-                    plate=plate,
-                    matched_entry=entry,
-                    match_rule="归一化匹配",
-                )
+            for prefix in sorted(self._prefix_set, key=len, reverse=True):
+                if plate.startswith(prefix):
+                    return MatchResult(
+                        matched=True,
+                        plate=plate,
+                        match_rule=f"前缀匹配: {prefix}*",
+                    )
 
-        return MatchResult(matched=False, plate=plate, match_rule="未匹配")
+            normalized = self._normalize(plate)
+            for entry_plate, entry in self._entries.items():
+                if self._normalize(entry_plate) == normalized:
+                    return MatchResult(
+                        matched=True,
+                        plate=plate,
+                        matched_entry=entry,
+                        match_rule="归一化匹配",
+                    )
+
+            return MatchResult(matched=False, plate=plate, match_rule="未匹配")
 
     # ---- 内部方法 ----
 

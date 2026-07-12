@@ -1,0 +1,370 @@
+"""FastAPI application and HTTP routes."""
+
+from __future__ import annotations
+
+import re
+import shutil
+from contextlib import asynccontextmanager
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
+from uuid import uuid4
+
+from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile, status
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
+
+from .config import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AppConfig, default_config
+from .preview_stream import MultiCameraPreviewService
+from .schemas import (
+    CameraUpdate,
+    DetectionSettingsUpdate,
+    PauseRequest,
+    SegmentPayload,
+    SourceSelection,
+    WhitelistEnabledUpdate,
+    WhitelistInput,
+)
+from .state import ApplicationState
+
+
+def _safe_filename(filename: str, fallback: str) -> str:
+    name = Path(filename or fallback).name
+    name = re.sub(r"[^\w.()-]+", "_", name, flags=re.UNICODE).strip("._")
+    return (name or fallback)[-120:]
+
+
+def _copy_upload(source, destination: Path, max_bytes: int) -> None:
+    written = 0
+    with destination.open("wb") as target:
+        while chunk := source.read(1024 * 1024):
+            written += len(chunk)
+            if written > max_bytes:
+                raise ValueError("上传文件超过大小限制")
+            target.write(chunk)
+
+
+async def _store_upload(
+    upload: UploadFile,
+    directory: Path,
+    allowed_extensions: set[str],
+    max_bytes: int,
+) -> Path:
+    original_name = _safe_filename(upload.filename or "upload", "upload")
+    extension = Path(original_name).suffix.lower()
+    if extension not in allowed_extensions:
+        allowed = ", ".join(sorted(allowed_extensions))
+        raise HTTPException(status_code=415, detail=f"不支持的文件类型，可用类型: {allowed}")
+
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / f"{uuid4().hex}_{original_name}"
+    try:
+        await run_in_threadpool(_copy_upload, upload.file, destination, max_bytes)
+    except ValueError as exc:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except OSError as exc:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"文件保存失败: {exc}") from exc
+    finally:
+        await upload.close()
+    return destination
+
+
+def create_app(
+    config: AppConfig | None = None,
+    *,
+    start_video: bool = True,
+) -> FastAPI:
+    config = config or default_config()
+    runtime = ApplicationState(config)
+    preview_stream = MultiCameraPreviewService(config.stream_sources)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        if start_video:
+            runtime.start()
+            preview_stream.prewarm()
+        yield
+        preview_stream.stop()
+        if start_video:
+            runtime.shutdown()
+
+    app = FastAPI(
+        title="沙盘交通智控台 API",
+        version="1.0.0",
+        lifespan=lifespan,
+    )
+    app.state.runtime = runtime
+    app.state.preview_stream = preview_stream
+
+    @app.get("/api/health")
+    def health() -> dict:
+        return {"status": "ok", "service": "video-test", "version": app.version}
+
+    @app.get("/api/system")
+    def system_info() -> dict:
+        return {
+            "name": "沙盘交通智控台",
+            "sources": runtime.source_catalog(),
+            "devices": runtime.devices,
+        }
+
+    @app.get("/api/stream/status")
+    def stream_status() -> dict:
+        return runtime.video.status()
+
+    @app.post("/api/stream/select")
+    def select_stream(payload: SourceSelection) -> dict:
+        url = config.stream_sources.get(payload.source_id)
+        if url is None:
+            raise HTTPException(status_code=404, detail="视频源不存在")
+        preview_stream.cancel_prewarm()
+        runtime.video.select_source(payload.source_id, payload.source_id, url)
+        return runtime.video.status()
+
+    @app.post("/api/stream/upload", status_code=status.HTTP_201_CREATED)
+    async def upload_video(
+        file: UploadFile = File(...),
+        camera_id: str | None = Query(default=None, max_length=100),
+    ) -> dict:
+        if camera_id is not None and camera_id not in config.stream_sources:
+            raise HTTPException(status_code=404, detail="关联摄像头不存在")
+        path = await _store_upload(
+            file,
+            config.upload_dir,
+            VIDEO_EXTENSIONS,
+            max_bytes=4 * 1024 * 1024 * 1024,
+        )
+        source_id = camera_id or next(iter(config.stream_sources), "本地视频")
+        preview_stream.cancel_prewarm()
+        runtime.video.select_source(
+            source_id,
+            source_id,
+            str(path),
+            display_name=Path(file.filename or path.name).name,
+        )
+        return {"file": path.name, "stream": runtime.video.status()}
+
+    @app.post("/api/stream/pause")
+    def pause_stream(payload: PauseRequest) -> dict:
+        runtime.video.set_paused(payload.paused)
+        return runtime.video.status()
+
+    @app.post("/api/stream/stop")
+    def stop_stream() -> dict:
+        runtime.video.stop_stream()
+        return runtime.video.status()
+
+    @app.put("/api/detection/settings")
+    def update_detection(payload: DetectionSettingsUpdate) -> dict:
+        values = payload.model_dump(exclude_none=True)
+        if "device" in values and values["device"] not in {
+            item["id"] for item in runtime.devices
+        }:
+            raise HTTPException(status_code=422, detail="推理设备不可用")
+        runtime.video.update_detection_settings(**values)
+        return runtime.video.status()["detection"]
+
+    @app.get("/api/video/feed")
+    def video_feed() -> StreamingResponse:
+        def frames():
+            sequence = -1
+            while True:
+                sequence, frame = runtime.video.wait_for_frame(sequence)
+                if frame is None:
+                    continue
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    + f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii")
+                    + frame
+                    + b"\r\n"
+                )
+
+        return StreamingResponse(
+            frames(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/api/video/preview")
+    def video_preview(
+        source_id: str = Query(min_length=1, max_length=100),
+    ) -> StreamingResponse:
+        if not preview_stream.has_source(source_id):
+            raise HTTPException(status_code=404, detail="视频源不存在")
+
+        def frames():
+            sequence = -1
+            with preview_stream.subscribe(source_id):
+                while True:
+                    sequence, frame = preview_stream.wait_for_frame(source_id, sequence)
+                    if frame is None:
+                        continue
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        + f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii")
+                        + frame
+                        + b"\r\n"
+                    )
+
+        return StreamingResponse(
+            frames(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/api/video/preview/snapshot")
+    def video_preview_snapshot(
+        source_id: str = Query(min_length=1, max_length=100),
+        cached_only: bool = Query(default=False),
+    ) -> Response:
+        if not preview_stream.has_source(source_id):
+            raise HTTPException(status_code=404, detail="视频源不存在")
+        frame = preview_stream.snapshot(source_id, cached_only=cached_only)
+        if frame is None:
+            if cached_only:
+                return Response(status_code=status.HTTP_204_NO_CONTENT)
+            raise HTTPException(status_code=503, detail="摄像头暂时无可用画面")
+        return Response(
+            frame,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/api/video/snapshot")
+    def video_snapshot() -> Response:
+        frame = runtime.video.latest_frame()
+        if frame is None:
+            raise HTTPException(status_code=409, detail="当前没有可用视频帧")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return Response(
+            frame,
+            media_type="image/jpeg",
+            headers={"Content-Disposition": f'attachment; filename="snapshot_{timestamp}.jpg"'},
+        )
+
+    @app.get("/api/whitelist")
+    def get_whitelist() -> dict:
+        return {
+            "enabled": runtime.whitelist.enabled,
+            "count": runtime.whitelist.count,
+            "entries": [asdict(entry) for entry in runtime.whitelist.get_all()],
+        }
+
+    @app.post("/api/whitelist", status_code=status.HTTP_201_CREATED)
+    def upsert_whitelist(payload: WhitelistInput) -> dict:
+        existed = runtime.whitelist.get(payload.plate) is not None
+        runtime.whitelist.add(payload.plate, payload.note)
+        runtime.save_whitelist()
+        entry = runtime.whitelist.get(payload.plate)
+        return {"created": not existed, "entry": asdict(entry) if entry else None}
+
+    @app.delete("/api/whitelist/{plate}")
+    def delete_whitelist(plate: str) -> dict:
+        if not runtime.whitelist.remove(plate):
+            raise HTTPException(status_code=404, detail="白名单条目不存在")
+        runtime.save_whitelist()
+        return {"deleted": True, "count": runtime.whitelist.count}
+
+    @app.delete("/api/whitelist")
+    def clear_whitelist() -> dict:
+        runtime.whitelist.clear()
+        runtime.save_whitelist()
+        return {"deleted": True, "count": 0}
+
+    @app.patch("/api/whitelist/enabled")
+    def set_whitelist_enabled(payload: WhitelistEnabledUpdate) -> dict:
+        runtime.whitelist.enabled = payload.enabled
+        return {"enabled": runtime.whitelist.enabled}
+
+    @app.get("/api/map")
+    def get_map() -> dict:
+        return runtime.map_snapshot()
+
+    @app.get("/api/map/image")
+    def get_map_image() -> FileResponse:
+        path = runtime.map_image_path()
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="地图底图不存在")
+        return FileResponse(path)
+
+    @app.post("/api/map/image", status_code=status.HTTP_201_CREATED)
+    async def upload_map_image(file: UploadFile = File(...)) -> dict:
+        path = await _store_upload(
+            file,
+            config.map_upload_dir,
+            IMAGE_EXTENSIONS,
+            max_bytes=30 * 1024 * 1024,
+        )
+        runtime.set_map_image(path)
+        return {"image_url": runtime.map_snapshot()["image_url"]}
+
+    @app.put("/api/map/cameras/{camera_id}")
+    def update_camera(camera_id: str, payload: CameraUpdate) -> dict:
+        with runtime.map_lock:
+            if camera_id not in runtime.traffic_map.cameras:
+                raise HTTPException(status_code=404, detail="摄像头不存在")
+            if payload.segment_id and payload.segment_id not in runtime.traffic_map.segments:
+                raise HTTPException(status_code=422, detail="关联道路不存在")
+            camera = runtime.traffic_map.set_camera(camera_id=camera_id, **payload.model_dump())
+            runtime.traffic_map.save()
+            return asdict(camera)
+
+    def save_segment(payload: SegmentPayload, segment_id: str = "") -> dict:
+        with runtime.map_lock:
+            values = payload.model_dump()
+            values["segment_id"] = segment_id or values["segment_id"]
+            try:
+                segment = runtime.traffic_map.upsert_segment(**values)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            runtime.traffic_map.save()
+            return asdict(segment)
+
+    @app.post("/api/map/segments", status_code=status.HTTP_201_CREATED)
+    def create_segment(payload: SegmentPayload) -> dict:
+        return save_segment(payload)
+
+    @app.put("/api/map/segments/{segment_id}")
+    def update_segment(segment_id: str, payload: SegmentPayload) -> dict:
+        with runtime.map_lock:
+            if segment_id not in runtime.traffic_map.segments:
+                raise HTTPException(status_code=404, detail="道路不存在")
+        return save_segment(payload, segment_id)
+
+    @app.delete("/api/map/segments/{segment_id}")
+    def delete_segment(segment_id: str) -> dict:
+        with runtime.map_lock:
+            if segment_id not in runtime.traffic_map.segments:
+                raise HTTPException(status_code=404, detail="道路不存在")
+            if not runtime.traffic_map.delete_segment(segment_id):
+                raise HTTPException(status_code=409, detail="至少需要保留一条道路")
+            runtime.traffic_map.save()
+            return {"deleted": True, "segment_id": segment_id}
+
+    @app.post("/api/map/reset-runtime")
+    def reset_map_runtime() -> dict:
+        with runtime.map_lock:
+            runtime.traffic_map.reset_runtime()
+        return {"reset": True}
+
+    app.mount("/static", StaticFiles(directory=config.frontend_dir), name="static")
+
+    @app.get("/", include_in_schema=False)
+    def index() -> FileResponse:
+        return FileResponse(config.frontend_dir / "index.html")
+
+    return app
+
+
+app = create_app()

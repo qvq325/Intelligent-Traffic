@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>沙盘交通智控台</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <span class="brand-mark"><i data-lucide="scan-line"></i></span>
+        <div>
+          <h1>沙盘交通智控台</h1>
+          <p id="active-source-label">视频与道路态势监控</p>
+        </div>
+      </div>
+      <div class="system-state">
+        <span class="status-dot" id="connection-dot"></span>
+        <span id="connection-label">服务连接中</span>
+        <span class="topbar-divider"></span>
+        <time id="system-clock">--:--:--</time>
+      </div>
+    </header>
+
+    <aside class="sidebar" aria-label="主导航">
+      <nav>
+        <button class="nav-button active" data-view="monitor" type="button">
+          <i data-lucide="monitor-play"></i><span>实时监控</span>
+        </button>
+        <button class="nav-button" data-view="map" type="button">
+          <i data-lucide="map"></i><span>道路态势</span>
+        </button>
+        <button class="nav-button" data-view="whitelist" type="button">
+          <i data-lucide="shield-check"></i><span>白名单</span>
+        </button>
+      </nav>
+      <a class="nav-button docs-link" href="/docs" target="_blank" rel="noreferrer">
+        <i data-lucide="braces"></i><span>API 文档</span>
+      </a>
+    </aside>
+
+    <main class="main-content">
+      <section class="view active" id="view-monitor" aria-labelledby="monitor-title">
+        <div class="page-toolbar monitor-toolbar">
+          <div class="toolbar-title">
+            <h2 id="monitor-title">实时监控</h2>
+            <span class="muted" id="stream-message">请选择视频源</span>
+          </div>
+          <div class="segmented-control monitor-mode-control" aria-label="监控画面模式">
+            <button class="active" data-monitor-mode="single" type="button" aria-pressed="true">
+              <i data-lucide="monitor"></i><span>单画面</span>
+            </button>
+            <button data-monitor-mode="multi" type="button" aria-pressed="false">
+              <i data-lucide="grid-3x3"></i><span>多摄像头</span>
+            </button>
+          </div>
+          <div class="stream-controls">
+            <label class="select-wrap source-select">
+              <span class="sr-only">视频源</span>
+              <select id="source-select" aria-label="视频源"></select>
+            </label>
+            <button class="icon-button primary" id="play-button" type="button" title="播放">
+              <i data-lucide="play"></i>
+            </button>
+            <button class="icon-button" id="pause-button" type="button" title="暂停" disabled>
+              <i data-lucide="pause"></i>
+            </button>
+            <button class="icon-button" id="stop-button" type="button" title="停止" disabled>
+              <i data-lucide="square"></i>
+            </button>
+            <button class="icon-button" id="upload-video-button" type="button" title="打开本地视频">
+              <i data-lucide="folder-open"></i>
+            </button>
+            <button class="icon-button" id="snapshot-button" type="button" title="下载截图" disabled>
+              <i data-lucide="camera"></i>
+            </button>
+            <input id="video-file-input" type="file" accept="video/*" hidden>
+          </div>
+          <label class="switch-field detection-switch">
+            <input id="detection-toggle" type="checkbox">
+            <span class="switch" aria-hidden="true"></span>
+            <span>智能检测</span>
+          </label>
+        </div>
+
+        <div class="monitor-layout" id="single-monitor-layout">
+          <section class="video-workspace" aria-label="视频画面">
+            <div class="workspace-head">
+              <div class="source-identity">
+                <span class="live-badge" id="live-badge">待机</span>
+                <strong id="video-source-name">未选择视频源</strong>
+              </div>
+              <div class="stream-meta">
+                <span id="resolution-label">-- × --</span>
+                <span id="fps-label">0.0 FPS</span>
+              </div>
+            </div>
+            <div class="video-stage" id="video-stage">
+              <img id="video-feed" alt="实时视频画面">
+              <img class="video-switch-preview" id="video-switch-preview" alt="切换中的摄像头预览" hidden>
+              <div class="video-empty" id="video-empty">
+                <i data-lucide="video-off"></i>
+                <strong>暂无视频画面</strong>
+                <span id="video-empty-detail">请选择视频源</span>
+              </div>
+              <div class="paused-overlay" id="paused-overlay" hidden>
+                <i data-lucide="pause"></i><span>已暂停</span>
+              </div>
+            </div>
+            <div class="metrics-strip">
+              <div><span>车辆</span><strong id="metric-vehicles">0</strong></div>
+              <div><span>车牌</span><strong id="metric-plates">0</strong></div>
+              <div><span>白名单</span><strong id="metric-whitelisted">0</strong></div>
+              <div class="detection-state"><span>检测状态</span><strong id="detection-status">未启用</strong></div>
+            </div>
+          </section>
+
+          <aside class="inspector monitor-inspector">
+            <div class="segmented-tabs" role="tablist">
+              <button class="active" data-monitor-tab="results" type="button">检测结果</button>
+              <button data-monitor-tab="settings" type="button">检测参数</button>
+            </div>
+
+            <div class="inspector-pane active" id="monitor-results-pane">
+              <div class="pane-heading">
+                <h3>当前画面</h3>
+                <span class="count-badge" id="result-count">0</span>
+              </div>
+              <div class="table-scroll results-scroll">
+                <table>
+                  <thead><tr><th>目标</th><th>车牌</th><th>置信度</th><th>状态</th></tr></thead>
+                  <tbody id="results-body"></tbody>
+                </table>
+                <div class="empty-table" id="results-empty">暂无检测结果</div>
+              </div>
+            </div>
+
+            <form class="inspector-pane settings-form" id="monitor-settings-pane">
+              <div class="pane-heading"><h3>推理配置</h3></div>
+              <label class="field">
+                <span>推理设备</span>
+                <select id="device-select"></select>
+              </label>
+              <label class="field range-field">
+                <span>车辆阈值 <output id="yolo-output">0.50</output></span>
+                <input id="yolo-threshold" type="range" min="0.05" max="1" step="0.05" value="0.5">
+              </label>
+              <label class="field range-field">
+                <span>车牌阈值 <output id="lpr-output">0.70</output></span>
+                <input id="lpr-threshold" type="range" min="0.05" max="1" step="0.05" value="0.7">
+              </label>
+              <label class="field">
+                <span>检测间隔</span>
+                <div class="number-unit"><input id="detect-interval" type="number" min="1" max="60" value="5"><span>帧</span></div>
+              </label>
+              <button class="command-button primary" type="submit">
+                <i data-lucide="save"></i><span>应用参数</span>
+              </button>
+            </form>
+          </aside>
+        </div>
+
+        <section class="multi-camera-workspace" id="multi-camera-workspace" aria-label="多摄像头实时监控" hidden>
+          <div class="multi-camera-grid" id="multi-camera-grid"></div>
+          <nav class="multi-camera-pagination" aria-label="摄像头页面切换">
+            <button class="icon-button small" id="multi-camera-previous" type="button" title="上一页">
+              <i data-lucide="chevron-left"></i>
+            </button>
+            <span id="multi-camera-page-label" aria-live="polite">1 / 1</span>
+            <button class="icon-button small" id="multi-camera-next" type="button" title="下一页">
+              <i data-lucide="chevron-right"></i>
+            </button>
+          </nav>
+        </section>
+      </section>
+
+      <section class="view" id="view-map" aria-labelledby="map-title">
+        <div class="page-toolbar">
+          <div class="toolbar-title">
+            <h2 id="map-title">道路态势</h2>
+            <span class="muted" id="map-summary">0 条道路 · 0 个目标</span>
+          </div>
+          <div class="toolbar-actions">
+            <label class="switch-field compact">
+              <input id="map-background-toggle" type="checkbox" checked>
+              <span class="switch" aria-hidden="true"></span>
+              <span>底图</span>
+            </label>
+            <button class="icon-button" id="upload-map-button" type="button" title="更换底图">
+              <i data-lucide="image-up"></i>
+            </button>
+            <button class="icon-button" id="refresh-map-button" type="button" title="刷新态势">
+              <i data-lucide="refresh-cw"></i>
+            </button>
+            <button class="icon-button danger-ghost" id="reset-map-button" type="button" title="清除运行轨迹">
+              <i data-lucide="rotate-ccw"></i>
+            </button>
+            <input id="map-file-input" type="file" accept="image/*" hidden>
+          </div>
+        </div>
+
+        <div class="map-layout">
+          <section class="map-workspace" aria-label="交通地图">
+            <div class="map-frame" id="map-frame">
+              <img id="map-background" alt="沙盘交通地图">
+              <canvas id="traffic-map-canvas"></canvas>
+              <div class="map-legend" aria-label="拥堵图例">
+                <span><i class="legend-clear"></i>畅通</span>
+                <span><i class="legend-slow"></i>缓行</span>
+                <span><i class="legend-busy"></i>拥挤</span>
+                <span><i class="legend-jam"></i>拥堵</span>
+                <span><i class="legend-uncovered"></i>未覆盖</span>
+              </div>
+              <div class="draw-status" id="draw-status" hidden>
+                <span id="draw-status-text">道路绘制</span>
+                <button class="icon-button small" id="finish-draw-button" type="button" title="完成绘制">
+                  <i data-lucide="check"></i>
+                </button>
+                <button class="icon-button small" id="cancel-draw-button" type="button" title="取消绘制">
+                  <i data-lucide="x"></i>
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <aside class="inspector map-inspector">
+            <div class="segmented-tabs" role="tablist">
+              <button class="active" data-map-tab="camera" type="button">摄像头</button>
+              <button data-map-tab="road" type="button">道路</button>
+            </div>
+
+            <form class="inspector-pane active editor-form" id="camera-editor">
+              <div class="pane-heading"><h3>摄像头配置</h3></div>
+              <label class="field"><span>摄像头</span><select id="camera-select"></select></label>
+              <label class="field"><span>关联道路</span><select id="camera-segment-select"></select></label>
+              <div class="field-row">
+                <label class="field"><span>横向位置</span><input id="camera-x" type="number" min="0" max="1" step="0.001"></label>
+                <label class="field"><span>纵向位置</span><input id="camera-y" type="number" min="0" max="1" step="0.001"></label>
+              </div>
+              <label class="field range-field">
+                <span>朝向 <output id="camera-heading-output">0°</output></span>
+                <input id="camera-heading" type="range" min="0" max="360" step="1">
+              </label>
+              <label class="field range-field">
+                <span>视野范围 <output id="camera-range-output">0.12</output></span>
+                <input id="camera-range" type="range" min="0.01" max="0.5" step="0.01">
+              </label>
+              <div class="form-actions">
+                <button class="command-button" id="place-camera-button" type="button">
+                  <i data-lucide="crosshair"></i><span>定位</span>
+                </button>
+                <button class="command-button primary" type="submit">
+                  <i data-lucide="save"></i><span>保存</span>
+                </button>
+              </div>
+            </form>
+
+            <form class="inspector-pane editor-form" id="road-editor">
+              <div class="pane-heading">
+                <h3>道路配置</h3>
+                <button class="icon-button small" id="new-road-button" type="button" title="新建道路"><i data-lucide="plus"></i></button>
+              </div>
+              <label class="field"><span>道路</span><select id="road-select"></select></label>
+              <label class="field"><span>名称</span><input id="road-name" type="text" maxlength="100"></label>
+              <div class="field-row">
+                <label class="field"><span>容量</span><input id="road-capacity" type="number" min="1" max="10000"></label>
+                <label class="field"><span>层级</span>
+                  <select id="road-level"><option value="ground">地面</option><option value="bridge">桥梁</option><option value="parking">停车场</option><option value="service">服务区</option></select>
+                </label>
+              </div>
+              <label class="field"><span>方向</span><input id="road-direction" type="text" maxlength="30"></label>
+              <div class="segmented-control" aria-label="道路绘制方式">
+                <button id="draw-polyline-button" type="button"><i data-lucide="git-commit-horizontal"></i><span>折线</span></button>
+                <button id="draw-curve-button" type="button"><i data-lucide="spline"></i><span>曲线</span></button>
+              </div>
+              <div class="form-actions three">
+                <button class="command-button danger" id="delete-road-button" type="button">
+                  <i data-lucide="trash-2"></i><span>删除</span>
+                </button>
+                <button class="command-button primary" type="submit">
+                  <i data-lucide="save"></i><span>保存</span>
+                </button>
+              </div>
+            </form>
+          </aside>
+        </div>
+
+        <section class="road-stats">
+          <div class="section-heading"><h3>道路运行状态</h3><span id="road-stats-updated">--:--:--</span></div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>道路</th><th>方向</th><th>车辆</th><th>流量/分钟</th><th>占用率</th><th>状态</th></tr></thead>
+              <tbody id="road-stats-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" id="view-whitelist" aria-labelledby="whitelist-title">
+        <div class="page-toolbar">
+          <div class="toolbar-title">
+            <h2 id="whitelist-title">车辆白名单</h2>
+            <span class="muted"><strong id="whitelist-count">0</strong> 条记录</span>
+          </div>
+          <label class="switch-field compact">
+            <input id="whitelist-toggle" type="checkbox" checked>
+            <span class="switch" aria-hidden="true"></span>
+            <span>启用匹配</span>
+          </label>
+        </div>
+
+        <form class="whitelist-form" id="whitelist-form">
+          <label class="field"><span>车牌号码</span><input id="whitelist-plate" type="text" maxlength="20" autocomplete="off" required></label>
+          <label class="field grow"><span>备注</span><input id="whitelist-note" type="text" maxlength="200" autocomplete="off"></label>
+          <button class="command-button primary" type="submit"><i data-lucide="plus"></i><span>添加车辆</span></button>
+        </form>
+
+        <section class="whitelist-table-panel">
+          <div class="section-heading">
+            <h3>白名单记录</h3>
+            <button class="command-button danger subtle" id="clear-whitelist-button" type="button">
+              <i data-lucide="trash-2"></i><span>清空</span>
+            </button>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>车牌号码</th><th>备注</th><th>添加时间</th><th class="action-column">操作</th></tr></thead>
+              <tbody id="whitelist-body"></tbody>
+            </table>
+            <div class="empty-table" id="whitelist-empty">暂无白名单记录</div>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

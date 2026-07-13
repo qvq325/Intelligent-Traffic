@@ -66,6 +66,12 @@ const elements = {
   noParkingFeed: $("#no-parking-feed"),
   noParkingReference: $("#no-parking-reference"),
   noParkingEmpty: $("#no-parking-empty"),
+  noParkingTopologyFrame: $("#no-parking-topology-frame"),
+  noParkingTopologyBackground: $("#no-parking-topology-background"),
+  noParkingTopologyZones: $("#no-parking-topology-zones"),
+  noParkingTopologyMarkers: $("#no-parking-topology-markers"),
+  noParkingTopologySummary: $("#no-parking-topology-summary"),
+  noParkingTopologyEmpty: $("#no-parking-topology-empty"),
   noParkingDrawButton: $("#no-parking-draw-button"),
   noParkingFinishDrawButton: $("#no-parking-finish-draw-button"),
   noParkingUndoButton: $("#no-parking-undo-button"),
@@ -190,6 +196,8 @@ const MULTI_CAMERA_PAGE_SIZE = 6;
 const MAP_REFERENCE_HEIGHT = 740;
 const DEFAULT_ROAD_WIDTH_PIXELS = 36;
 const ROAD_PREVIEW_HOVER_DELAY = 160;
+const NO_PARKING_TOPOLOGY_HALF_FOV = (32 * Math.PI) / 180;
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
 let roadPreviewTimer = null;
 let pendingRoadPreview = null;
@@ -228,6 +236,32 @@ const noParkingCanvas = new VideoRegionEditor(
     },
   },
 );
+
+const noParkingTopologyCanvas = new TrafficMapCanvas(
+  $("#no-parking-topology-canvas"),
+  elements.noParkingTopologyFrame,
+  {
+    onCameraSelect: (cameraId) => {
+      const preferred = state.noParkingCatalog.find(
+        (scene) => scene.scene_id === state.noParkingSceneId && scene.camera_id === cameraId,
+      );
+      const scene = preferred || state.noParkingCatalog.find((item) => item.camera_id === cameraId);
+      if (scene) openNoParkingTopologyScene(scene.scene_id).catch(reportError);
+    },
+  },
+);
+
+$$('[data-no-parking-view-mode]').forEach((button) => {
+  button.addEventListener("click", () => {
+    const mode = button.dataset.noParkingViewMode;
+    setNoParkingWorkspaceMode(mode);
+    if (mode === "topology") loadNoParkingTopology().catch(reportError);
+  });
+});
+
+$('[data-view="no-parking"]')?.addEventListener("click", () => {
+  setNoParkingWorkspaceMode("video");
+});
 
 function refreshIcons() {
   window.lucide?.createIcons();
@@ -812,6 +846,213 @@ function currentNoParkingScene() {
   return state.noParkingCatalog.find((scene) => scene.scene_id === state.noParkingSceneId) || null;
 }
 
+function noParkingWorkspaceMode() {
+  return elements.noParkingTopologyFrame.hidden ? "video" : "topology";
+}
+
+function setNoParkingWorkspaceMode(mode) {
+  const topology = mode === "topology";
+  elements.noParkingStage.hidden = topology;
+  elements.noParkingTopologyFrame.hidden = !topology;
+  $$('[data-no-parking-view-mode]').forEach((button) => {
+    const active = button.dataset.noParkingViewMode === (topology ? "topology" : "video");
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  if (topology) {
+    stopNoParkingFeed();
+    window.requestAnimationFrame(() => noParkingTopologyCanvas.resize());
+  } else {
+    ensureNoParkingFeed(true);
+  }
+}
+
+function clampTopologyCoordinate(value) {
+  return Math.min(0.99, Math.max(0.01, Number(value) || 0));
+}
+
+function projectNoParkingZonePoint(camera, point) {
+  const imageX = Math.min(1, Math.max(0, Number(point?.[0]) || 0));
+  const imageY = Math.min(1, Math.max(0, Number(point?.[1]) || 0));
+  const heading = (Number(camera.heading || 0) * Math.PI) / 180;
+  const viewRange = Math.min(0.5, Math.max(0.01, Number(camera.view_range) || 0.12));
+  const depth = viewRange * (0.12 + (1 - imageY) * 0.88);
+  const lateral = (imageX - 0.5) * 2 * depth * Math.tan(NO_PARKING_TOPOLOGY_HALF_FOV);
+  const forwardX = Math.sin(heading);
+  const forwardY = -Math.cos(heading);
+  const rightX = Math.cos(heading);
+  const rightY = Math.sin(heading);
+  return [
+    clampTopologyCoordinate(Number(camera.x) + forwardX * depth + rightX * lateral),
+    clampTopologyCoordinate(Number(camera.y) + forwardY * depth + rightY * lateral),
+  ];
+}
+
+function topologyPolygonCenter(points, fallback) {
+  if (!points.length) return [Number(fallback.x), Number(fallback.y)];
+  return [
+    points.reduce((total, point) => total + point[0], 0) / points.length,
+    points.reduce((total, point) => total + point[1], 0) / points.length,
+  ];
+}
+
+function renderNoParkingTopology(map, scenes = state.noParkingCatalog) {
+  noParkingTopologyCanvas.setData(map);
+  if (elements.noParkingTopologyBackground.dataset.url !== map.image_url) {
+    elements.noParkingTopologyBackground.dataset.url = map.image_url;
+    elements.noParkingTopologyBackground.src = map.image_url;
+  }
+
+  elements.noParkingTopologyZones.replaceChildren();
+  elements.noParkingTopologyMarkers.replaceChildren();
+  const cameraStacks = new Map();
+  const activeSceneId = state.noParkingStatus?.active_scene_id || "";
+  const activeAlarms = Number(state.noParkingStatus?.metrics?.active_alarms || 0);
+  let markerCount = 0;
+  let unmappedCount = 0;
+
+  for (const scene of scenes) {
+    const camera = map.cameras.find((item) => item.camera_id === scene.camera_id);
+    if (!camera) {
+      unmappedCount += scene.zones?.length || 1;
+      continue;
+    }
+    const zones = scene.zones?.length ? scene.zones : [{ name: "禁停区域" }];
+    for (const zone of zones) {
+      const stackIndex = cameraStacks.get(camera.camera_id) || 0;
+      cameraStacks.set(camera.camera_id, stackIndex + 1);
+      const projectedPoints = (zone.points || []).map(
+        (point) => projectNoParkingZonePoint(camera, point),
+      );
+      const projectedCenter = topologyPolygonCenter(projectedPoints, camera);
+      const sceneRunning = scene.scene_id === activeSceneId && state.noParkingStatus?.running;
+      const sceneAlarm = sceneRunning && activeAlarms > 0;
+
+      if (projectedPoints.length >= 3) {
+        const link = document.createElementNS(SVG_NAMESPACE, "line");
+        link.classList.add("no-parking-topology-zone-link");
+        link.setAttribute("x1", String(camera.x));
+        link.setAttribute("y1", String(camera.y));
+        link.setAttribute("x2", String(projectedCenter[0]));
+        link.setAttribute("y2", String(projectedCenter[1]));
+        elements.noParkingTopologyZones.append(link);
+
+        const polygon = document.createElementNS(SVG_NAMESPACE, "polygon");
+        polygon.classList.add("no-parking-topology-zone");
+        if (sceneRunning) polygon.classList.add(sceneAlarm ? "alarm" : "running");
+        polygon.setAttribute(
+          "points",
+          projectedPoints.map((point) => `${point[0]},${point[1]}`).join(" "),
+        );
+        polygon.setAttribute("role", "button");
+        polygon.setAttribute("tabindex", "0");
+        polygon.setAttribute(
+          "aria-label",
+          `打开禁停区域 ${zone.name}，摄像头 ${scene.camera_id}`,
+        );
+        const title = document.createElementNS(SVG_NAMESPACE, "title");
+        title.textContent = `${zone.name} · ${scene.name} · ${scene.camera_id} · 估算范围`;
+        polygon.append(title);
+        polygon.addEventListener("click", () => {
+          openNoParkingTopologyScene(scene.scene_id).catch(reportError);
+        });
+        polygon.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          openNoParkingTopologyScene(scene.scene_id).catch(reportError);
+        });
+        elements.noParkingTopologyZones.append(polygon);
+      }
+
+      const marker = document.createElement("button");
+      marker.type = "button";
+      marker.className = "no-parking-topology-marker";
+      if (projectedCenter[1] < 0.22) marker.classList.add("below-camera");
+      if (sceneRunning) {
+        marker.classList.add(sceneAlarm ? "alarm" : "running");
+      }
+      marker.style.left = `${projectedCenter[0] * 100}%`;
+      marker.style.top = `${projectedCenter[1] * 100}%`;
+      marker.style.setProperty("--marker-offset", `${stackIndex * 38}px`);
+      marker.title = `${zone.name} · ${scene.name} · ${scene.camera_id}`;
+      marker.setAttribute(
+        "aria-label",
+        `打开禁停区域 ${zone.name}，摄像头 ${scene.camera_id}`,
+      );
+
+      const icon = document.createElement("i");
+      icon.dataset.lucide = activeAlarms && scene.scene_id === activeSceneId
+        ? "octagon-alert"
+        : "shield-alert";
+      const label = document.createElement("span");
+      label.className = "no-parking-topology-marker-label";
+      const name = document.createElement("strong");
+      name.textContent = zone.name;
+      const cameraName = document.createElement("small");
+      cameraName.textContent = scene.camera_id;
+      label.append(name, cameraName);
+      marker.append(icon, label);
+      marker.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openNoParkingTopologyScene(scene.scene_id).catch(reportError);
+      });
+      elements.noParkingTopologyMarkers.append(marker);
+      markerCount += 1;
+    }
+  }
+
+  const missingText = unmappedCount ? ` · ${unmappedCount} 个区域未找到摄像头位置` : "";
+  elements.noParkingTopologySummary.textContent = (
+    `${scenes.length} 个场景 · ${markerCount} 个禁停区域${missingText}`
+  );
+  elements.noParkingTopologyEmpty.hidden = markerCount > 0;
+  refreshIcons();
+}
+
+async function loadNoParkingTopology() {
+  elements.noParkingTopologySummary.textContent = "正在加载拓扑";
+  const [map, payload] = await Promise.all([api.map(), api.noParking()]);
+  state.noParkingCatalog = payload.scenes || [];
+  renderNoParkingSceneOptions();
+  renderNoParkingStatus(payload.status);
+  renderNoParkingTopology(map, state.noParkingCatalog);
+}
+
+async function openNoParkingTopologyScene(sceneId) {
+  const scene = state.noParkingCatalog.find((item) => item.scene_id === sceneId);
+  if (!scene) return;
+  if (
+    state.noParkingStatus?.running
+    && state.noParkingStatus.active_scene_id !== sceneId
+  ) {
+    showToast("请先停止当前禁停监控，再切换到其他场景", "error");
+    return;
+  }
+
+  selectNoParkingScene(sceneId);
+  setNoParkingWorkspaceMode("video");
+  activateNoParkingTab("config");
+  const source = state.stream?.active_source;
+  if (!source || source.id !== scene.camera_id || state.stream?.paused || !state.stream?.connected) {
+    await connectNoParkingSource();
+  } else {
+    showNoParkingLive();
+    ensureNoParkingFeed(true);
+  }
+  showToast(`已打开 ${scene.name} · ${scene.camera_id}`, "success");
+}
+
+async function pollNoParkingTopology() {
+  if (state.activeView === "no-parking" && noParkingWorkspaceMode() === "topology") {
+    try {
+      renderNoParkingTopology(await api.map());
+    } catch (error) {
+      console.error(error);
+    }
+  }
+  window.setTimeout(pollNoParkingTopology, document.hidden ? 5000 : 2000);
+}
+
 function formatParkingDuration(value) {
   const seconds = Math.max(0, Number(value) || 0);
   return seconds >= 60
@@ -901,6 +1142,31 @@ function selectNoParkingScene(sceneId) {
     noParkingCanvas.setMedia(elements.noParkingFeed);
   }
   renderNoParkingControls();
+}
+
+function syncNoParkingSceneToSource() {
+  const sourceId = elements.noParkingSourceSelect.value;
+  const activeScene = state.noParkingStatus?.active_scene;
+  if (
+    state.noParkingStatus?.running
+    && activeScene
+    && sourceId !== activeScene.camera_id
+  ) {
+    elements.noParkingSourceSelect.value = activeScene.camera_id;
+    showToast("请先停止当前禁停监控，再切换摄像头", "error");
+    renderNoParkingControls();
+    return;
+  }
+
+  const selectedScene = currentNoParkingScene();
+  if (selectedScene?.camera_id === sourceId) {
+    renderNoParkingControls();
+    return;
+  }
+  const matchingScene = state.noParkingCatalog.find(
+    (scene) => scene.camera_id === sourceId,
+  );
+  selectNoParkingScene(matchingScene?.scene_id || "");
 }
 
 function renderNoParkingControls() {
@@ -1842,7 +2108,7 @@ function bindEvents() {
     button.addEventListener("click", () => activateNoParkingTab(button.dataset.noParkingTab));
   });
 
-  elements.noParkingSourceSelect.addEventListener("change", renderNoParkingControls);
+  elements.noParkingSourceSelect.addEventListener("change", syncNoParkingSceneToSource);
   elements.noParkingConnectButton.addEventListener("click", () => connectNoParkingSource().catch(reportError));
   elements.noParkingUploadButton.addEventListener("click", () => elements.noParkingFileInput.click());
   elements.noParkingFileInput.addEventListener("change", () => {
@@ -2109,3 +2375,4 @@ async function initialize() {
 initialize();
 pollMapAnalysis();
 pollNoParking();
+pollNoParkingTopology();

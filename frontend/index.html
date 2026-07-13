@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>沙盘交通智控台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/styles.css?v=20260713-2">
+  <link rel="stylesheet" href="/static/styles.css?v=20260713-4">
 </head>
 <body>
   <div class="app-shell">
@@ -384,6 +384,14 @@
                 <span class="live-badge" id="no-parking-source-badge">待机</span>
                 <strong id="no-parking-source-name">未选择视频源</strong>
               </div>
+              <div class="segmented-control no-parking-view-control" role="group" aria-label="禁停工作区模式">
+                <button class="active" data-no-parking-view-mode="video" type="button" aria-pressed="true">
+                  <i data-lucide="video"></i><span>视频</span>
+                </button>
+                <button data-no-parking-view-mode="topology" type="button" aria-pressed="false">
+                  <i data-lucide="network"></i><span>拓扑</span>
+                </button>
+              </div>
               <div class="stream-controls">
                 <label class="select-wrap source-select">
                   <span class="sr-only">禁停监控视频源</span>
@@ -424,6 +432,25 @@
                 <button class="icon-button small danger-ghost" id="no-parking-clear-zone-button" type="button" title="清除区域" disabled>
                   <i data-lucide="eraser"></i>
                 </button>
+              </div>
+            </div>
+
+            <div class="map-frame no-parking-topology-frame" id="no-parking-topology-frame" hidden>
+              <img id="no-parking-topology-background" alt="禁停监控道路拓扑图">
+              <canvas id="no-parking-topology-canvas" aria-label="禁停监控道路拓扑"></canvas>
+              <svg class="no-parking-topology-zones" id="no-parking-topology-zones" viewBox="0 0 1 1" preserveAspectRatio="none" aria-label="禁停区域拓扑投影"></svg>
+              <div class="no-parking-topology-markers" id="no-parking-topology-markers" aria-label="已配置禁停区域"></div>
+              <div class="map-legend" aria-label="道路状态图例">
+                <span><i class="legend-clear"></i>畅通</span>
+                <span><i class="legend-slow"></i>缓行</span>
+                <span><i class="legend-busy"></i>拥挤</span>
+                <span><i class="legend-jam"></i>拥堵</span>
+                <span><i class="legend-uncovered"></i>未覆盖</span>
+              </div>
+              <div class="no-parking-topology-summary" id="no-parking-topology-summary">正在加载拓扑</div>
+              <div class="no-parking-topology-empty" id="no-parking-topology-empty">
+                <i data-lucide="map-pin-off"></i>
+                <span>暂无已绑定摄像头的禁停区域</span>
               </div>
             </div>
 
@@ -543,6 +570,6 @@
   <div class="toast-region" id="toast-region" aria-live="polite"></div>
 
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script type="module" src="/static/js/app.js?v=20260713-6"></script>
+  <script type="module" src="/static/js/app.js?v=20260713-9"></script>
 </body>
 </html>

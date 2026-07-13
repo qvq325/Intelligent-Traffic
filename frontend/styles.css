@@ -1699,6 +1699,24 @@ tbody tr.selected {
   gap: 16px;
 }
 
+.no-parking-view-control {
+  width: 168px;
+  flex: 0 0 168px;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.no-parking-view-control button {
+  min-height: 30px;
+}
+
+.no-parking-view-control svg {
+  width: 15px;
+  height: 15px;
+}
+
 .no-parking-source-bar .stream-controls {
   width: auto;
   margin-left: auto;
@@ -1713,6 +1731,11 @@ tbody tr.selected {
   place-items: center;
   overflow: hidden;
   background: #090b09;
+}
+
+.no-parking-stage[hidden],
+.no-parking-topology-frame[hidden] {
+  display: none;
 }
 
 .no-parking-stage > img,
@@ -1745,6 +1768,171 @@ tbody tr.selected {
 
 .no-parking-stage .video-empty {
   z-index: 3;
+}
+
+.no-parking-topology-frame {
+  min-height: 320px;
+  border-width: 0;
+  border-radius: 0;
+}
+
+.no-parking-topology-zones {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.no-parking-topology-zone-link {
+  stroke: rgb(223 95 97 / 62%);
+  stroke-dasharray: 5 4;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.no-parking-topology-zone {
+  fill: rgb(223 95 97 / 24%);
+  stroke: #ed7779;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+  cursor: pointer;
+  pointer-events: all;
+}
+
+.no-parking-topology-zone:hover,
+.no-parking-topology-zone:focus {
+  fill: rgb(223 95 97 / 38%);
+  stroke: #ffadaf;
+  outline: none;
+}
+
+.no-parking-topology-zone.running {
+  fill: rgb(226 185 79 / 26%);
+  stroke: var(--amber);
+}
+
+.no-parking-topology-zone.alarm {
+  fill: rgb(223 95 97 / 46%);
+  stroke: #ffc0c1;
+  stroke-width: 3;
+}
+
+.no-parking-topology-markers {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.no-parking-topology-marker {
+  --marker-offset: 0px;
+  position: absolute;
+  display: flex;
+  max-width: 168px;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  color: #ffe8e8;
+  background: rgb(43 23 24 / 96%);
+  border: 1px solid rgb(223 95 97 / 72%);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 34%);
+  transform: translate(-50%, calc(-100% - 12px - var(--marker-offset)));
+  pointer-events: auto;
+}
+
+.no-parking-topology-marker.below-camera {
+  transform: translate(-50%, calc(12px + var(--marker-offset)));
+}
+
+.no-parking-topology-marker:hover,
+.no-parking-topology-marker:focus-visible {
+  background: #563033;
+  border-color: #f08b8d;
+}
+
+.no-parking-topology-marker.running {
+  border-color: var(--amber);
+}
+
+.no-parking-topology-marker.alarm {
+  background: #642e31;
+  border-color: #ff9b9d;
+}
+
+.no-parking-topology-marker > svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  color: #f08b8d;
+}
+
+.no-parking-topology-marker-label {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+  text-align: left;
+}
+
+.no-parking-topology-marker-label strong,
+.no-parking-topology-marker-label small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.no-parking-topology-marker-label strong {
+  font-size: 10px;
+}
+
+.no-parking-topology-marker-label small {
+  color: #d5a9aa;
+  font-size: 8px;
+}
+
+.no-parking-topology-summary {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 5;
+  max-width: calc(100% - 20px);
+  padding: 6px 8px;
+  overflow: hidden;
+  color: var(--text);
+  background: rgb(20 23 20 / 88%);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.no-parking-topology-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.no-parking-topology-empty[hidden] {
+  display: none;
+}
+
+.no-parking-topology-empty svg {
+  width: 24px;
+  height: 24px;
 }
 
 .roi-toolstrip {
@@ -1990,7 +2178,15 @@ tbody tr.selected {
     margin-left: 0;
   }
 
+  .no-parking-view-control {
+    order: 3;
+  }
+
   .no-parking-stage {
+    min-height: 240px;
+  }
+
+  .no-parking-topology-frame {
     min-height: 240px;
   }
 
@@ -2090,6 +2286,14 @@ tbody tr.selected {
   .no-parking-stage {
     min-height: 190px;
     aspect-ratio: 16 / 10;
+  }
+
+  .no-parking-topology-frame {
+    min-height: 190px;
+  }
+
+  .no-parking-topology-marker {
+    max-width: 116px;
   }
 
   .no-parking-metrics {

@@ -315,7 +315,7 @@ def test_frontend_shell_prevents_stale_asset_initialization_failure(client):
     app_js = client.get("/static/js/app.js").text
 
     assert index.headers["cache-control"] == "no-store"
-    assert "/static/js/app.js?v=20260713-6" in index.text
+    assert "/static/js/app.js?v=20260713-9" in index.text
     assert 'id="road-video-preview"' in index.text
     assert 'id="road-video-preview-status">实时</span>' in index.text
     assert "/api/video/preview?source_id=" in app_js
@@ -389,7 +389,16 @@ def test_no_parking_page_is_available_from_the_main_navigation(client):
     assert 'id="no-parking-canvas"' in index
     assert 'id="no-parking-reference-button"' in index
     assert 'id="no-parking-start-button"' in index
+    assert 'data-no-parking-view-mode="topology"' in index
+    assert 'id="no-parking-topology-canvas"' in index
+    assert 'id="no-parking-topology-zones"' in index
+    assert 'id="no-parking-topology-markers"' in index
     assert 'request("/api/no-parking/status")' in api_js
     assert "function captureNoParkingReference()" in app_js
+    assert "function loadNoParkingTopology()" in app_js
+    assert "function openNoParkingTopologyScene(sceneId)" in app_js
+    assert "function projectNoParkingZonePoint(camera, point)" in app_js
+    assert "function syncNoParkingSceneToSource()" in app_js
+    assert 'addEventListener("change", syncNoParkingSceneToSource)' in app_js
     assert "class VideoRegionEditor" in canvas_js
     assert "mediaRect()" in canvas_js

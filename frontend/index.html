@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>沙盘交通智控台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/styles.css?v=20260713-1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260713-2">
 </head>
 <body>
   <div class="app-shell">
@@ -239,6 +239,20 @@
             <div class="map-frame" id="map-frame">
               <img id="map-background" alt="沙盘交通地图">
               <canvas id="traffic-map-canvas"></canvas>
+              <aside class="road-video-preview" id="road-video-preview" aria-live="polite" hidden>
+                <div class="road-video-preview-stage">
+                  <img id="road-video-preview-feed" alt="道路关联摄像头实时画面">
+                  <div class="road-video-preview-placeholder" id="road-video-preview-placeholder">
+                    <i data-lucide="loader-circle"></i>
+                    <span>正在连接视频</span>
+                  </div>
+                  <span class="road-video-preview-status" id="road-video-preview-status">实时</span>
+                </div>
+                <div class="road-video-preview-meta">
+                  <strong id="road-video-preview-road">道路</strong>
+                  <span id="road-video-preview-camera">摄像头</span>
+                </div>
+              </aside>
               <div class="map-legend" aria-label="拥堵图例">
                 <span><i class="legend-clear"></i>畅通</span>
                 <span><i class="legend-slow"></i>缓行</span>
@@ -529,6 +543,6 @@
   <div class="toast-region" id="toast-region" aria-live="polite"></div>
 
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script type="module" src="/static/js/app.js?v=20260713-1"></script>
+  <script type="module" src="/static/js/app.js?v=20260713-6"></script>
 </body>
 </html>

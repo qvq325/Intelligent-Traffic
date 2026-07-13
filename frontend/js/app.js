@@ -107,6 +107,12 @@ const elements = {
   mapAnalysisStatus: $("#map-analysis-status"),
   mapAnalysisRoad: $("#map-analysis-road"),
   mapAnalysisModel: $("#map-analysis-model"),
+  roadVideoPreview: $("#road-video-preview"),
+  roadVideoPreviewFeed: $("#road-video-preview-feed"),
+  roadVideoPreviewPlaceholder: $("#road-video-preview-placeholder"),
+  roadVideoPreviewStatus: $("#road-video-preview-status"),
+  roadVideoPreviewRoad: $("#road-video-preview-road"),
+  roadVideoPreviewCamera: $("#road-video-preview-camera"),
   drawStatus: $("#draw-status"),
   drawStatusText: $("#draw-status-text"),
   finishDrawButton: $("#finish-draw-button"),
@@ -183,6 +189,10 @@ const state = {
 const MULTI_CAMERA_PAGE_SIZE = 6;
 const MAP_REFERENCE_HEIGHT = 740;
 const DEFAULT_ROAD_WIDTH_PIXELS = 36;
+const ROAD_PREVIEW_HOVER_DELAY = 160;
+
+let roadPreviewTimer = null;
+let pendingRoadPreview = null;
 
 const mapCanvas = new TrafficMapCanvas(
   $("#traffic-map-canvas"),
@@ -195,6 +205,9 @@ const mapCanvas = new TrafficMapCanvas(
     onModeChange: (mode, points) => renderDrawMode(mode, points),
   },
 );
+
+mapCanvas.canvas.addEventListener("pointermove", (event) => scheduleRoadVideoPreview(event));
+mapCanvas.canvas.addEventListener("pointerleave", () => closeRoadVideoPreview());
 
 const noParkingCanvas = new VideoRegionEditor(
   $("#no-parking-canvas"),
@@ -1324,8 +1337,176 @@ function mapAnalysisCanStart() {
   return Boolean(selected?.value && !selected.disabled);
 }
 
+function roadVideoPreviewEnabled() {
+  return state.activeView === "map";
+}
+
+function camerasForSegment(segmentId) {
+  const sourceIds = new Set((state.system?.sources || []).map((source) => source.id));
+  return (state.map?.cameras || []).filter(
+    (camera) => camera.segment_id === segmentId && sourceIds.has(camera.camera_id),
+  );
+}
+
+function positionRoadVideoPreview(clientX, clientY) {
+  const preview = elements.roadVideoPreview;
+  if (preview.hidden) return;
+  const bounds = elements.mapFrame.getBoundingClientRect();
+  const gap = 14;
+  const margin = 8;
+  const width = preview.offsetWidth;
+  const height = preview.offsetHeight;
+  const pointerX = clientX - bounds.left;
+  const pointerY = clientY - bounds.top;
+  const left = pointerX + gap + width <= bounds.width - margin
+    ? pointerX + gap
+    : pointerX - width - gap;
+  const top = pointerY + gap + height <= bounds.height - margin
+    ? pointerY + gap
+    : pointerY - height - gap;
+  preview.style.left = `${Math.max(margin, Math.min(left, bounds.width - width - margin))}px`;
+  preview.style.top = `${Math.max(margin, Math.min(top, bounds.height - height - margin))}px`;
+}
+
+function openRoadVideoPreview(segment, cameras, camera, clientX, clientY) {
+  if (!roadVideoPreviewEnabled()) return;
+  const preview = elements.roadVideoPreview;
+  const feed = elements.roadVideoPreviewFeed;
+  const cameraCount = cameras.length > 1 ? ` · ${cameras.length} 个摄像头` : "";
+
+  preview.dataset.segmentId = segment.segment_id;
+  preview.dataset.cameraId = camera.camera_id;
+  preview.classList.remove("feed-ready", "feed-error");
+  elements.roadVideoPreviewRoad.textContent = segment.name;
+  elements.roadVideoPreviewCamera.textContent = `${camera.camera_id}${cameraCount}`;
+  elements.roadVideoPreviewPlaceholder.querySelector("span").textContent = "正在连接视频";
+  elements.roadVideoPreviewStatus.textContent = "实时";
+  preview.hidden = false;
+  positionRoadVideoPreview(clientX, clientY);
+
+  feed.onload = () => {
+    if (preview.dataset.cameraId !== camera.camera_id) return;
+    preview.classList.add("feed-ready");
+    preview.classList.remove("feed-error");
+    if (feed.dataset.phase === "snapshot") {
+      elements.roadVideoPreviewStatus.textContent = "正在连接";
+      feed.dataset.phase = "stream";
+      window.setTimeout(() => {
+        if (!preview.hidden && feed.dataset.streamUrl) feed.src = feed.dataset.streamUrl;
+      }, 0);
+      return;
+    }
+    elements.roadVideoPreviewStatus.textContent = "实时";
+  };
+  feed.onerror = () => {
+    if (preview.dataset.cameraId !== camera.camera_id) return;
+    if (feed.dataset.phase === "snapshot") {
+      feed.dataset.phase = "stream";
+      if (!preview.hidden && feed.dataset.streamUrl) feed.src = feed.dataset.streamUrl;
+      return;
+    }
+    preview.classList.remove("feed-ready");
+    preview.classList.add("feed-error");
+    elements.roadVideoPreviewPlaceholder.querySelector("span").textContent = "视频暂不可用";
+    elements.roadVideoPreviewStatus.textContent = "连接异常";
+  };
+  const sourceId = encodeURIComponent(camera.camera_id);
+  feed.dataset.phase = "snapshot";
+  feed.dataset.streamUrl = `/api/video/preview?source_id=${sourceId}&client=${Date.now()}`;
+  feed.src = `/api/video/preview/snapshot?source_id=${sourceId}&cached_only=true&client=${Date.now()}`;
+}
+
+function closeRoadVideoPreview() {
+  if (roadPreviewTimer) window.clearTimeout(roadPreviewTimer);
+  roadPreviewTimer = null;
+  pendingRoadPreview = null;
+  const preview = elements.roadVideoPreview;
+  const feed = elements.roadVideoPreviewFeed;
+  preview.hidden = true;
+  preview.classList.remove("feed-ready", "feed-error");
+  delete preview.dataset.segmentId;
+  delete preview.dataset.cameraId;
+  feed.onload = null;
+  feed.onerror = null;
+  feed.removeAttribute("src");
+  delete feed.dataset.phase;
+  delete feed.dataset.streamUrl;
+}
+
+function scheduleRoadVideoPreview(event) {
+  if (!roadVideoPreviewEnabled() || mapCanvas.mode) {
+    closeRoadVideoPreview();
+    return;
+  }
+  const point = mapCanvas.normalizedPoint(event);
+  const camera = mapCanvas.nearestCamera(point, 20);
+  const segment = state.map?.segments.find(
+    (item) => item.segment_id === camera?.segment_id,
+  );
+  const cameras = segment ? camerasForSegment(segment.segment_id) : [];
+  if (!camera || !segment || !cameras.some((item) => item.camera_id === camera.camera_id)) {
+    closeRoadVideoPreview();
+    return;
+  }
+
+  mapCanvas.tooltip.hidden = true;
+  const key = `${segment.segment_id}:${camera.camera_id}`;
+  const preview = elements.roadVideoPreview;
+  if (!preview.hidden && preview.dataset.segmentId === segment.segment_id
+      && preview.dataset.cameraId === camera.camera_id) {
+    positionRoadVideoPreview(event.clientX, event.clientY);
+    return;
+  }
+  if (pendingRoadPreview?.key === key) {
+    pendingRoadPreview.clientX = event.clientX;
+    pendingRoadPreview.clientY = event.clientY;
+    return;
+  }
+
+  closeRoadVideoPreview();
+  pendingRoadPreview = {
+    key,
+    segment,
+    cameras: [camera],
+    camera,
+    clientX: event.clientX,
+    clientY: event.clientY,
+  };
+  roadPreviewTimer = window.setTimeout(() => {
+    const pending = pendingRoadPreview;
+    roadPreviewTimer = null;
+    pendingRoadPreview = null;
+    if (!pending) return;
+    openRoadVideoPreview(
+      pending.segment,
+      pending.cameras,
+      pending.camera,
+      pending.clientX,
+      pending.clientY,
+    );
+  }, ROAD_PREVIEW_HOVER_DELAY);
+}
+
+function syncRoadVideoPreview() {
+  if (!roadVideoPreviewEnabled()) {
+    closeRoadVideoPreview();
+    return;
+  }
+  const preview = elements.roadVideoPreview;
+  if (preview.hidden) return;
+  const cameras = camerasForSegment(preview.dataset.segmentId);
+  if (!cameras.some((camera) => camera.camera_id === preview.dataset.cameraId)) {
+    closeRoadVideoPreview();
+    return;
+  }
+  if (!preview.classList.contains("feed-error") && elements.roadVideoPreviewFeed.dataset.phase !== "snapshot") {
+    elements.roadVideoPreviewStatus.textContent = "实时";
+  }
+}
+
 function renderMapAnalysis(analysis) {
   state.mapAnalysis = analysis;
+  syncRoadVideoPreview();
   const activeSource = analysis?.active_source;
   if (
     !elements.mapAnalysisCameraSelect.value

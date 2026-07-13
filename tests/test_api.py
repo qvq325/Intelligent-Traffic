@@ -315,7 +315,12 @@ def test_frontend_shell_prevents_stale_asset_initialization_failure(client):
     app_js = client.get("/static/js/app.js").text
 
     assert index.headers["cache-control"] == "no-store"
-    assert "/static/js/app.js?v=20260713-1" in index.text
+    assert "/static/js/app.js?v=20260713-6" in index.text
+    assert 'id="road-video-preview"' in index.text
+    assert 'id="road-video-preview-status">实时</span>' in index.text
+    assert "/api/video/preview?source_id=" in app_js
+    assert "mapCanvas.nearestCamera(point, 20)" in app_js
+    assert 'return state.activeView === "map";' in app_js
     assert "drawPolygonButton?.addEventListener" in app_js
 
 

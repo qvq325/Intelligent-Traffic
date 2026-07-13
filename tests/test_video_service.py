@@ -36,3 +36,18 @@ def test_video_service_publishes_jpeg_frames():
     assert jpeg is not None
     assert jpeg.startswith(b"\xff\xd8")
     assert service.status()["resolution"] == {"width": 64, "height": 48}
+
+
+def test_video_service_can_restart_the_selected_local_source():
+    service = VideoStreamService(WhitelistManager())
+    service.select_source("camera-1", "道路1", "example.mp4")
+    initial_revision = service._source_revision
+    service.set_paused(True)
+
+    assert service.restart_source() is True
+    assert service._source_revision == initial_revision + 1
+    assert service.status()["paused"] is False
+    assert service.status()["active_source"]["id"] == "camera-1"
+
+    service.stop_stream()
+    assert service.restart_source() is False

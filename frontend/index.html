@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>沙盘交通智控台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=20260713-1">
 </head>
 <body>
   <div class="app-shell">
@@ -33,6 +33,9 @@
         </button>
         <button class="nav-button" data-view="map" type="button">
           <i data-lucide="map"></i><span>道路态势</span>
+        </button>
+        <button class="nav-button" data-view="no-parking" type="button">
+          <i data-lucide="octagon-alert"></i><span>禁停监控</span>
         </button>
         <button class="nav-button" data-view="whitelist" type="button">
           <i data-lucide="shield-check"></i><span>白名单</span>
@@ -203,6 +206,34 @@
           </div>
         </div>
 
+        <section class="map-analysis-bar" aria-label="道路热力分析控制">
+          <div class="map-analysis-title">
+            <i data-lucide="scan-line"></i>
+            <span>热力分析摄像头</span>
+          </div>
+          <label class="map-analysis-source">
+            <span class="sr-only">选择热力分析摄像头</span>
+            <select id="map-analysis-camera-select" aria-label="选择热力分析摄像头"></select>
+          </label>
+          <div class="map-analysis-controls">
+            <button class="icon-button" id="map-analysis-start-button" type="button" title="开始热力分析">
+              <i data-lucide="play"></i>
+            </button>
+            <button class="icon-button" id="map-analysis-pause-button" type="button" title="暂停热力分析" disabled>
+              <i data-lucide="pause"></i>
+            </button>
+            <button class="icon-button danger-ghost" id="map-analysis-stop-button" type="button" title="停止热力分析" disabled>
+              <i data-lucide="square"></i>
+            </button>
+          </div>
+          <div class="map-analysis-state" aria-live="polite">
+            <i class="map-analysis-dot" id="map-analysis-dot" aria-hidden="true"></i>
+            <strong id="map-analysis-status">未启动</strong>
+            <span id="map-analysis-road">未选择道路</span>
+            <span id="map-analysis-model">模型未启用</span>
+          </div>
+        </section>
+
         <div class="map-layout">
           <section class="map-workspace" aria-label="交通地图">
             <div class="map-frame" id="map-frame">
@@ -273,9 +304,14 @@
                 </label>
               </div>
               <label class="field"><span>方向</span><input id="road-direction" type="text" maxlength="30"></label>
+              <label class="field range-field" id="road-width-field">
+                <span>道路总宽 <output id="road-width-output">36 px</output></span>
+                <input id="road-width" type="range" min="4" max="120" step="1" value="36">
+              </label>
               <div class="segmented-control" aria-label="道路绘制方式">
                 <button id="draw-polyline-button" type="button"><i data-lucide="git-commit-horizontal"></i><span>折线</span></button>
                 <button id="draw-curve-button" type="button"><i data-lucide="spline"></i><span>曲线</span></button>
+                <button id="draw-polygon-button" type="button"><i data-lucide="pentagon"></i><span>区域</span></button>
               </div>
               <div class="form-actions three">
                 <button class="command-button danger" id="delete-road-button" type="button">
@@ -298,6 +334,158 @@
             </table>
           </div>
         </section>
+      </section>
+
+      <section class="view" id="view-no-parking" aria-labelledby="no-parking-title">
+        <div class="page-toolbar no-parking-toolbar">
+          <div class="toolbar-title">
+            <h2 id="no-parking-title">禁停监控</h2>
+            <span class="muted" id="no-parking-summary">尚未配置监控场景</span>
+          </div>
+          <div class="no-parking-run-state" aria-live="polite">
+            <i class="status-dot" id="no-parking-status-dot" aria-hidden="true"></i>
+            <strong id="no-parking-status-label">未启动</strong>
+          </div>
+          <div class="toolbar-actions">
+            <button class="command-button primary" id="no-parking-start-button" type="button" disabled>
+              <i data-lucide="play"></i><span>启动监控</span>
+            </button>
+            <button class="command-button danger subtle" id="no-parking-stop-button" type="button" disabled>
+              <i data-lucide="square"></i><span>停止</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="workflow-strip" aria-label="禁停监控配置进度">
+          <div data-no-parking-step="source"><i>1</i><span>视频源</span></div>
+          <div data-no-parking-step="reference"><i>2</i><span>参考帧</span></div>
+          <div data-no-parking-step="zone"><i>3</i><span>区域配置</span></div>
+          <div data-no-parking-step="monitor"><i>4</i><span>监控</span></div>
+        </div>
+
+        <div class="no-parking-layout">
+          <section class="video-workspace no-parking-workspace" aria-label="禁停区域标定画面">
+            <div class="workspace-head no-parking-source-bar">
+              <div class="source-identity">
+                <span class="live-badge" id="no-parking-source-badge">待机</span>
+                <strong id="no-parking-source-name">未选择视频源</strong>
+              </div>
+              <div class="stream-controls">
+                <label class="select-wrap source-select">
+                  <span class="sr-only">禁停监控视频源</span>
+                  <select id="no-parking-source-select" aria-label="禁停监控视频源"></select>
+                </label>
+                <button class="icon-button primary" id="no-parking-connect-button" type="button" title="连接视频源">
+                  <i data-lucide="play"></i>
+                </button>
+                <button class="icon-button" id="no-parking-upload-button" type="button" title="打开本地视频">
+                  <i data-lucide="folder-open"></i>
+                </button>
+                <button class="icon-button" id="no-parking-reference-button" type="button" title="暂停并截取参考帧" disabled>
+                  <i data-lucide="scan-line"></i>
+                </button>
+                <input id="no-parking-file-input" type="file" accept="video/*" hidden>
+              </div>
+            </div>
+
+            <div class="no-parking-stage" id="no-parking-stage">
+              <img id="no-parking-feed" alt="禁停监控实时画面">
+              <img id="no-parking-reference" alt="禁停区域参考帧" hidden>
+              <canvas id="no-parking-canvas" aria-label="禁停区域绘制画布"></canvas>
+              <div class="video-empty" id="no-parking-empty">
+                <i data-lucide="video-off"></i>
+                <strong>暂无视频画面</strong>
+                <span>连接摄像头或打开本地视频</span>
+              </div>
+              <div class="roi-toolstrip" id="no-parking-draw-tools">
+                <button class="icon-button small" id="no-parking-draw-button" type="button" title="绘制禁停区域" disabled>
+                  <i data-lucide="pentagon"></i>
+                </button>
+                <button class="icon-button small primary" id="no-parking-finish-draw-button" type="button" title="完成绘制" disabled>
+                  <i data-lucide="check"></i>
+                </button>
+                <button class="icon-button small" id="no-parking-undo-button" type="button" title="撤销节点" disabled>
+                  <i data-lucide="undo-2"></i>
+                </button>
+                <button class="icon-button small danger-ghost" id="no-parking-clear-zone-button" type="button" title="清除区域" disabled>
+                  <i data-lucide="eraser"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="metrics-strip no-parking-metrics">
+              <div><span>监控区域</span><strong id="no-parking-zone-count">0</strong></div>
+              <div><span>区域内车辆</span><strong id="no-parking-track-count">0</strong></div>
+              <div><span>活动告警</span><strong id="no-parking-alarm-count">0</strong></div>
+              <div><span>累计事件</span><strong id="no-parking-event-count">0</strong></div>
+            </div>
+          </section>
+
+          <aside class="inspector no-parking-inspector">
+            <div class="segmented-tabs" role="tablist">
+              <button class="active" data-no-parking-tab="config" type="button">场景配置</button>
+              <button data-no-parking-tab="results" type="button">监控结果</button>
+            </div>
+
+            <form class="inspector-pane active editor-form" id="no-parking-config-form">
+              <div class="pane-heading">
+                <h3>场景档案</h3>
+                <div class="pane-actions">
+                  <button class="icon-button small" id="no-parking-new-scene-button" type="button" title="新建场景">
+                    <i data-lucide="plus"></i>
+                  </button>
+                  <button class="icon-button small danger-ghost" id="no-parking-delete-scene-button" type="button" title="删除场景" disabled>
+                    <i data-lucide="trash-2"></i>
+                  </button>
+                </div>
+              </div>
+              <label class="field"><span>已保存场景</span><select id="no-parking-scene-select"><option value="">新建场景</option></select></label>
+              <label class="field"><span>场景名称</span><input id="no-parking-scene-name" type="text" maxlength="100" value="禁停监控场景" required></label>
+              <label class="field"><span>区域名称</span><input id="no-parking-zone-name" type="text" maxlength="100" value="禁停区域" required></label>
+              <div class="field-row">
+                <label class="field"><span>停留阈值（秒）</span><input id="no-parking-dwell-seconds" type="number" min="1" max="3600" step="1" value="10" required></label>
+                <label class="field"><span>丢失容忍（秒）</span><input id="no-parking-lost-seconds" type="number" min="0.1" max="30" step="0.1" value="2" required></label>
+              </div>
+              <div class="reference-status">
+                <span>参考帧</span>
+                <strong id="no-parking-reference-status">未截取</strong>
+              </div>
+              <div class="form-actions">
+                <button class="command-button primary" id="no-parking-save-button" type="submit" disabled>
+                  <i data-lucide="save"></i><span>保存场景</span>
+                </button>
+              </div>
+            </form>
+
+            <div class="inspector-pane no-parking-results-pane" id="no-parking-results-pane">
+              <section>
+                <div class="pane-heading"><h3>区域内车辆</h3><span class="count-badge" id="no-parking-active-count">0</span></div>
+                <div class="table-scroll no-parking-track-scroll">
+                  <table>
+                    <thead><tr><th>目标</th><th>区域</th><th>停留</th><th>状态</th></tr></thead>
+                    <tbody id="no-parking-track-body"></tbody>
+                  </table>
+                  <div class="empty-table" id="no-parking-track-empty">当前区域内没有车辆</div>
+                </div>
+              </section>
+              <section class="event-section">
+                <div class="pane-heading">
+                  <h3>违规事件</h3>
+                  <button class="icon-button small danger-ghost" id="no-parking-clear-events-button" type="button" title="清空事件">
+                    <i data-lucide="trash-2"></i>
+                  </button>
+                </div>
+                <div class="table-scroll no-parking-event-scroll">
+                  <table>
+                    <thead><tr><th>时间</th><th>区域</th><th>车辆</th><th>状态</th></tr></thead>
+                    <tbody id="no-parking-event-body"></tbody>
+                  </table>
+                  <div class="empty-table" id="no-parking-event-empty">暂无违规停车事件</div>
+                </div>
+              </section>
+            </div>
+          </aside>
+        </div>
       </section>
 
       <section class="view" id="view-whitelist" aria-labelledby="whitelist-title">
@@ -341,6 +529,6 @@
   <div class="toast-region" id="toast-region" aria-live="polite"></div>
 
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script type="module" src="/static/js/app.js"></script>
+  <script type="module" src="/static/js/app.js?v=20260713-1"></script>
 </body>
 </html>

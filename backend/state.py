@@ -12,6 +12,7 @@ from traffic_map import TrafficMapModel
 from whitelist_manager import WhitelistManager
 
 from .config import AppConfig
+from .no_parking import NoParkingMonitor
 from .video_stream import VideoStreamService
 
 
@@ -37,18 +38,24 @@ class ApplicationState:
         ]
         default_device = self.devices[1]["id"] if len(self.devices) > 1 else self.devices[0]["id"]
 
-        self.video = VideoStreamService(
+        self.video = VideoStreamService(self.whitelist)
+        self.no_parking = NoParkingMonitor(config.upload_dir.parent / "no_parking")
+        self.video.add_detection_listener(self._handle_no_parking_detections)
+        self.map_analysis = VideoStreamService(
             self.whitelist,
             on_detections=self._handle_detections,
         )
         self.video.update_detection_settings(device=default_device)
+        self.map_analysis.update_detection_settings(device=default_device)
 
     def start(self) -> None:
         self.config.upload_dir.mkdir(parents=True, exist_ok=True)
         self.config.map_upload_dir.mkdir(parents=True, exist_ok=True)
         self.video.start()
+        self.map_analysis.start()
 
     def shutdown(self) -> None:
+        self.map_analysis.stop()
         self.video.stop()
         self.save_whitelist()
         with self.map_lock:
@@ -104,3 +111,11 @@ class ApplicationState:
     ) -> None:
         with self.map_lock:
             self.traffic_map.update_detections(camera_id, detections, frame_size)
+
+    def _handle_no_parking_detections(
+        self,
+        camera_id: str,
+        detections: list[DetectionResult],
+        frame_size: tuple[int, int],
+    ) -> None:
+        self.no_parking.update_detections(camera_id, detections, frame_size)

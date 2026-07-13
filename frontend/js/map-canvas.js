@@ -13,6 +13,10 @@ const COLORS = {
   text: "#f0f3ef",
 };
 
+const MIN_ROAD_WIDTH = 4 / 740;
+const DEFAULT_ROAD_WIDTH = 36 / 740;
+const MAX_ROAD_WIDTH = 120 / 740;
+
 function clamp(value, min = 0, max = 1) {
   return Math.min(max, Math.max(min, value));
 }
@@ -44,6 +48,18 @@ function pointToEdge(point, start, end) {
   });
 }
 
+function pointInPolygon(point, points) {
+  let inside = false;
+  for (let index = 0, previous = points.length - 1; index < points.length; previous = index, index += 1) {
+    const start = points[index];
+    const end = points[previous];
+    const crosses = (start.y > point.y) !== (end.y > point.y)
+      && point.x < ((end.x - start.x) * (point.y - start.y)) / (end.y - start.y) + start.x;
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
 export class TrafficMapCanvas {
   constructor(canvas, frame, callbacks = {}) {
     this.canvas = canvas;
@@ -56,6 +72,9 @@ export class TrafficMapCanvas {
     this.mode = "";
     this.drawingPoints = [];
     this.draftPoints = [];
+    this.draftGeometryType = "polyline";
+    this.roadWidth = DEFAULT_ROAD_WIDTH;
+    this.roadWidthSegment = "";
     this.cursorPoint = null;
     this.width = 1;
     this.height = 1;
@@ -100,8 +119,18 @@ export class TrafficMapCanvas {
     this.draw();
   }
 
-  setDraft(points) {
+  setDraft(points, geometryType = "polyline") {
     this.draftPoints = (points || []).map((point) => ({ x: point[0], y: point[1] }));
+    this.draftGeometryType = geometryType;
+    this.draw();
+  }
+
+  setRoadWidth(width) {
+    const normalized = Number(width);
+    this.roadWidth = Number.isFinite(normalized)
+      ? clamp(normalized, MIN_ROAD_WIDTH, MAX_ROAD_WIDTH)
+      : DEFAULT_ROAD_WIDTH;
+    this.roadWidthSegment = this.selectedSegment;
     this.draw();
   }
 
@@ -135,13 +164,15 @@ export class TrafficMapCanvas {
 
   finishDrawing() {
     if (!this.mode || this.mode === "place-camera") return false;
-    if (this.drawingPoints.length < 2) return false;
+    const geometryType = this.mode === "polygon" ? "polygon" : "polyline";
+    const minimumPoints = geometryType === "polygon" ? 3 : 2;
+    if (this.drawingPoints.length < minimumPoints) return false;
     const points = this.drawingPoints.map((point) => [point.x, point.y]);
     this.mode = "";
     this.drawingPoints = [];
     this.cursorPoint = null;
     this.frame.classList.remove("drawing", "placing");
-    this.callbacks.onDrawComplete?.(points);
+    this.callbacks.onDrawComplete?.(points, geometryType);
     this.callbacks.onModeChange?.(this.mode, []);
     this.draw();
     return true;
@@ -182,7 +213,7 @@ export class TrafficMapCanvas {
       this.cancelMode();
       return;
     }
-    if (this.mode === "polyline" || this.mode === "curve") {
+    if (this.mode === "polyline" || this.mode === "curve" || this.mode === "polygon") {
       this.drawingPoints.push(point);
       this.callbacks.onModeChange?.(this.mode, this.drawingPoints);
       if (this.mode === "curve" && this.drawingPoints.length === 3) {
@@ -208,14 +239,14 @@ export class TrafficMapCanvas {
   }
 
   onDoubleClick(event) {
-    if (this.mode !== "polyline") return;
+    if (this.mode !== "polyline" && this.mode !== "polygon") return;
     event.preventDefault();
     this.finishDrawing();
   }
 
   onPointerMove(event) {
     const point = this.normalizedPoint(event);
-    if (this.mode === "polyline" || this.mode === "curve") {
+    if (this.mode === "polyline" || this.mode === "curve" || this.mode === "polygon") {
       this.cursorPoint = point;
       this.tooltip.hidden = true;
       this.draw();
@@ -279,13 +310,18 @@ export class TrafficMapCanvas {
   nearestSegment(point, maxPixels) {
     const target = { x: point.x * this.width, y: point.y * this.height };
     let match = null;
-    let best = maxPixels;
+    let best = Number.POSITIVE_INFINITY;
     for (const segment of this.data.segments) {
-      for (let index = 0; index < segment.points.length - 1; index += 1) {
-        const start = this.canvasPoint(segment.points[index]);
-        const end = this.canvasPoint(segment.points[index + 1]);
+      const points = segment.points.map((item) => this.canvasPoint(item));
+      const isPolygon = segment.geometry_type === "polygon";
+      if (isPolygon && pointInPolygon(target, points)) return segment;
+      const hitRadius = maxPixels + (isPolygon ? 0 : this.roadWidthPixels(segment) / 2);
+      const edgeCount = isPolygon ? points.length : points.length - 1;
+      for (let index = 0; index < edgeCount; index += 1) {
+        const start = points[index];
+        const end = points[(index + 1) % points.length];
         const candidateDistance = pointToEdge(target, start, end);
-        if (candidateDistance <= best) {
+        if (candidateDistance <= hitRadius && candidateDistance < best) {
           best = candidateDistance;
           match = segment;
         }
@@ -306,6 +342,16 @@ export class TrafficMapCanvas {
     });
   }
 
+  roadWidthPixels(segment = null) {
+    const storedWidth = Number(segment?.road_width);
+    const width = !segment || segment.segment_id === this.roadWidthSegment
+      ? this.roadWidth
+      : Number.isFinite(storedWidth)
+        ? storedWidth
+        : DEFAULT_ROAD_WIDTH;
+    return clamp(width, MIN_ROAD_WIDTH, MAX_ROAD_WIDTH) * this.height;
+  }
+
   draw() {
     const context = this.context;
     context.clearRect(0, 0, this.width, this.height);
@@ -316,10 +362,15 @@ export class TrafficMapCanvas {
       if (segment.points.length < 2) continue;
       const color = heatColor(states.get(segment.segment_id)?.heat || 0, covered.has(segment.segment_id));
       const selected = segment.segment_id === this.selectedSegment;
-      if (selected) this.strokeSegment(segment, COLORS.selected, 11, []);
-      this.strokeSegment(segment, COLORS.outline, 8, []);
-      this.strokeSegment(segment, color, 4, segment.level === "bridge" ? [8, 6] : []);
-      if (segment.direction !== "双向") this.drawDirection(segment, color);
+      if (segment.geometry_type === "polygon" && segment.points.length >= 3) {
+        this.fillSegment(segment, color, selected);
+      } else {
+        const roadWidth = this.roadWidthPixels(segment);
+        if (selected) this.strokeSegment(segment, COLORS.selected, roadWidth + 10, []);
+        this.strokeSegment(segment, COLORS.outline, roadWidth + 4, []);
+        this.strokeSegment(segment, color, roadWidth, segment.level === "bridge" ? [8, 6] : []);
+        if (segment.direction !== "双向") this.drawDirection(segment, color);
+      }
       if (selected) this.drawSegmentLabel(segment);
     }
 
@@ -343,6 +394,34 @@ export class TrafficMapCanvas {
     context.lineCap = "round";
     context.lineJoin = "round";
     context.setLineDash(dash);
+    context.stroke();
+    context.restore();
+  }
+
+  fillSegment(segment, color, selected) {
+    const context = this.context;
+    context.save();
+    context.beginPath();
+    segment.points.forEach((point, index) => {
+      const current = this.canvasPoint(point);
+      if (index === 0) context.moveTo(current.x, current.y);
+      else context.lineTo(current.x, current.y);
+    });
+    context.closePath();
+    if (selected) {
+      context.strokeStyle = COLORS.selected;
+      context.lineWidth = 7;
+      context.lineJoin = "round";
+      context.stroke();
+    }
+    context.globalAlpha = 0.48;
+    context.fillStyle = color;
+    context.fill();
+    context.globalAlpha = 1;
+    context.strokeStyle = COLORS.outline;
+    context.lineWidth = 2;
+    context.lineJoin = "round";
+    context.setLineDash(segment.level === "bridge" ? [8, 6] : []);
     context.stroke();
     context.restore();
   }
@@ -483,15 +562,15 @@ export class TrafficMapCanvas {
   }
 
   drawPreview() {
-    if (this.mode !== "polyline" && this.mode !== "curve") return;
+    if (this.mode !== "polyline" && this.mode !== "curve" && this.mode !== "polygon") return;
     const points = [...this.drawingPoints];
     if (this.cursorPoint) points.push(this.cursorPoint);
     const context = this.context;
     context.save();
     context.strokeStyle = COLORS.selected;
     context.fillStyle = COLORS.selected;
-    context.lineWidth = 3;
-    context.setLineDash([7, 5]);
+    context.lineCap = "round";
+    context.lineJoin = "round";
     if (points.length > 1) {
       context.beginPath();
       points.forEach((point, index) => {
@@ -499,7 +578,28 @@ export class TrafficMapCanvas {
         if (index === 0) context.moveTo(current.x, current.y);
         else context.lineTo(current.x, current.y);
       });
-      context.stroke();
+      if (this.mode === "polygon" && points.length >= 3) {
+        context.closePath();
+        context.globalAlpha = 0.25;
+        context.fill();
+        context.globalAlpha = 1;
+        context.lineWidth = 3;
+        context.setLineDash([7, 5]);
+        context.stroke();
+      } else if (this.mode === "polygon") {
+        context.lineWidth = 3;
+        context.setLineDash([7, 5]);
+        context.stroke();
+      } else {
+        context.globalAlpha = 0.3;
+        context.lineWidth = this.roadWidthPixels();
+        context.setLineDash([]);
+        context.stroke();
+        context.globalAlpha = 1;
+        context.lineWidth = 2;
+        context.setLineDash([7, 5]);
+        context.stroke();
+      }
     }
     context.setLineDash([]);
     for (const point of this.drawingPoints) {
@@ -511,7 +611,8 @@ export class TrafficMapCanvas {
   }
 
   drawDraft() {
-    if (this.draftPoints.length < 2) return;
+    const isPolygon = this.draftGeometryType === "polygon";
+    if (this.draftPoints.length < (isPolygon ? 3 : 2)) return;
     const context = this.context;
     context.save();
     context.beginPath();
@@ -520,12 +621,30 @@ export class TrafficMapCanvas {
       if (index === 0) context.moveTo(current.x, current.y);
       else context.lineTo(current.x, current.y);
     });
+    if (isPolygon) {
+      context.closePath();
+      context.globalAlpha = 0.25;
+      context.fillStyle = COLORS.selected;
+      context.fill();
+      context.globalAlpha = 1;
+    }
     context.strokeStyle = COLORS.selected;
-    context.lineWidth = 5;
     context.lineCap = "round";
     context.lineJoin = "round";
-    context.setLineDash([9, 6]);
-    context.stroke();
+    if (isPolygon) {
+      context.lineWidth = 5;
+      context.setLineDash([9, 6]);
+      context.stroke();
+    } else {
+      context.globalAlpha = 0.3;
+      context.lineWidth = this.roadWidthPixels();
+      context.setLineDash([]);
+      context.stroke();
+      context.globalAlpha = 1;
+      context.lineWidth = 2;
+      context.setLineDash([9, 6]);
+      context.stroke();
+    }
     context.restore();
   }
 }

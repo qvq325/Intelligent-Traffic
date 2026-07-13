@@ -49,6 +49,27 @@ export const api = {
     return request(`/api/stream/upload${query}`, { method: "POST", body: form });
   },
 
+  noParking: () => request("/api/no-parking"),
+  noParkingStatus: () => request("/api/no-parking/status"),
+  captureNoParkingReference: (cameraId) => request(
+    "/api/no-parking/reference",
+    json("POST", { camera_id: cameraId }),
+  ),
+  saveNoParkingScene: (scene) => request(
+    "/api/no-parking/scenes",
+    json("POST", scene),
+  ),
+  deleteNoParkingScene: (sceneId) => request(
+    `/api/no-parking/scenes/${encodeURIComponent(sceneId)}`,
+    { method: "DELETE" },
+  ),
+  startNoParking: (sceneId) => request(
+    "/api/no-parking/start",
+    json("POST", { scene_id: sceneId }),
+  ),
+  stopNoParking: () => request("/api/no-parking/stop", { method: "POST" }),
+  clearNoParkingEvents: () => request("/api/no-parking/events", { method: "DELETE" }),
+
   whitelist: () => request("/api/whitelist"),
   saveWhitelist: (entry) => request("/api/whitelist", json("POST", entry)),
   deleteWhitelist: (plate) => request(`/api/whitelist/${encodeURIComponent(plate)}`, { method: "DELETE" }),
@@ -56,6 +77,16 @@ export const api = {
   setWhitelistEnabled: (enabled) => request("/api/whitelist/enabled", json("PATCH", { enabled })),
 
   map: () => request("/api/map"),
+  mapAnalysisStatus: () => request("/api/map/analysis/status"),
+  selectMapAnalysis: (sourceId) => request(
+    "/api/map/analysis/select",
+    json("POST", { source_id: sourceId }),
+  ),
+  pauseMapAnalysis: (paused) => request(
+    "/api/map/analysis/pause",
+    json("POST", { paused }),
+  ),
+  stopMapAnalysis: () => request("/api/map/analysis/stop", { method: "POST" }),
   updateCamera: (cameraId, camera) => request(
     `/api/map/cameras/${encodeURIComponent(cameraId)}`,
     json("PUT", camera),

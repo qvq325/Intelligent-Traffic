@@ -15,6 +15,9 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 Point = Tuple[float, float]
 TOPOLOGY_VERSION = 3
 MAP_SOURCE_SIZE = (1105.0, 740.0)
+MIN_ROAD_WIDTH = 4.0 / MAP_SOURCE_SIZE[1]
+DEFAULT_ROAD_WIDTH = 36.0 / MAP_SOURCE_SIZE[1]
+MAX_ROAD_WIDTH = 120.0 / MAP_SOURCE_SIZE[1]
 
 
 @dataclass
@@ -25,6 +28,8 @@ class RoadSegment:
     capacity: int = 4
     level: str = "ground"
     direction: str = "双向"
+    geometry_type: str = "polyline"
+    road_width: float = DEFAULT_ROAD_WIDTH
 
 
 @dataclass
@@ -221,11 +226,10 @@ class TrafficMapModel:
 
         topology_is_current = data.get("version") == TOPOLOGY_VERSION
         self.map_image_path = str(data.get("map_image", "") or "")
-        raw_segments = (
-            data.get("segments")
-            if topology_is_current and data.get("segments")
-            else [asdict(segment) for segment in default_segments()]
-        )
+        if topology_is_current and "segments" in data:
+            raw_segments = data.get("segments") or []
+        else:
+            raw_segments = [asdict(segment) for segment in default_segments()]
         self.segments = {
             item["segment_id"]: RoadSegment(
                 segment_id=item["segment_id"],
@@ -234,6 +238,11 @@ class TrafficMapModel:
                 capacity=max(1, int(item.get("capacity", 4))),
                 level=item.get("level", "ground"),
                 direction=item.get("direction", "双向"),
+                geometry_type=item.get("geometry_type", "polyline"),
+                road_width=min(
+                    MAX_ROAD_WIDTH,
+                    max(MIN_ROAD_WIDTH, float(item.get("road_width", DEFAULT_ROAD_WIDTH))),
+                ),
             )
             for item in raw_segments
         }
@@ -246,7 +255,7 @@ class TrafficMapModel:
         for camera_id in camera_ids:
             self.ensure_camera(camera_id)
         for camera in self.cameras.values():
-            if camera.segment_id not in self.segments:
+            if camera.segment_id and camera.segment_id not in self.segments:
                 camera.segment_id = self.nearest_segment((camera.x, camera.y))[0]
 
     def ensure_camera(self, camera_id: str) -> CameraPlacement:
@@ -291,18 +300,39 @@ class TrafficMapModel:
         capacity: int = 4,
         level: str = "ground",
         direction: str = "双向",
+        geometry_type: str = "polyline",
+        road_width: float = DEFAULT_ROAD_WIDTH,
     ) -> RoadSegment:
         segment_id = re.sub(r"[^A-Za-z0-9_-]+", "_", segment_id.strip())
         if not segment_id:
             segment_id = self.next_segment_id()
-        if len(points) < 2:
-            raise ValueError("道路至少需要两个点")
+        geometry_type = geometry_type.strip().lower()
+        if geometry_type not in {"polyline", "polygon"}:
+            raise ValueError("道路形状必须是中心线或道路区域")
+        minimum_points = 3 if geometry_type == "polygon" else 2
+        if len(points) < minimum_points:
+            message = (
+                "道路区域至少需要三个点"
+                if geometry_type == "polygon"
+                else "道路至少需要两个点"
+            )
+            raise ValueError(message)
         normalized = [
             (min(1.0, max(0.0, float(x))), min(1.0, max(0.0, float(y))))
             for x, y in points
         ]
+        if geometry_type == "polygon" and math.dist(normalized[0], normalized[-1]) < 1e-6:
+            normalized.pop()
+        if len(normalized) < minimum_points:
+            raise ValueError("道路区域至少需要三个不同的点")
         if all(math.dist(normalized[0], point) < 1e-6 for point in normalized[1:]):
             raise ValueError("道路起点和终点不能重合")
+        if geometry_type == "polygon" and self._polygon_area(normalized) < 1e-6:
+            raise ValueError("道路区域不能在同一直线上")
+        road_width = float(road_width)
+        if not math.isfinite(road_width):
+            road_width = DEFAULT_ROAD_WIDTH
+        road_width = min(MAX_ROAD_WIDTH, max(MIN_ROAD_WIDTH, road_width))
         segment = RoadSegment(
             segment_id=segment_id,
             name=name.strip() or segment_id,
@@ -310,19 +340,28 @@ class TrafficMapModel:
             capacity=max(1, int(capacity)),
             level=level.strip() or "ground",
             direction=direction.strip() or "双向",
+            geometry_type=geometry_type,
+            road_width=road_width,
         )
         self.segments[segment_id] = segment
         return segment
 
     def delete_segment(self, segment_id: str) -> bool:
-        if segment_id not in self.segments or len(self.segments) <= 1:
+        if segment_id not in self.segments:
             return False
         del self.segments[segment_id]
         self._heat.pop(segment_id, None)
         self._flow_events.pop(segment_id, None)
         for camera in self.cameras.values():
             if camera.segment_id == segment_id:
-                camera.segment_id = self.nearest_segment((camera.x, camera.y))[0]
+                camera.segment_id = (
+                    self.nearest_segment((camera.x, camera.y))[0]
+                    if self.segments
+                    else ""
+                )
+        if not self.segments:
+            self.reset_runtime()
+            return True
         for track in self.tracks.values():
             if track.segment_id == segment_id:
                 replacement, point, _ = self.nearest_segment((track.x, track.y))
@@ -404,12 +443,53 @@ class TrafficMapModel:
             remaining -= length
         return points[-1]
 
+    @staticmethod
+    def _polygon_area(points: Sequence[Point]) -> float:
+        return abs(sum(
+            start[0] * end[1] - end[0] * start[1]
+            for start, end in zip(points, [*points[1:], points[0]])
+        )) / 2.0
+
+    @classmethod
+    def _point_in_polygon(cls, point: Point, points: Sequence[Point]) -> bool:
+        inside = False
+        x, y = point
+        for start, end in zip(points, [*points[1:], points[0]]):
+            projected, _, distance = cls._project_to_line(point, start, end)
+            if distance < 1e-9 and math.dist(projected, point) < 1e-9:
+                return True
+            if (start[1] > y) == (end[1] > y):
+                continue
+            intersection_x = (
+                (end[0] - start[0]) * (y - start[1]) / (end[1] - start[1]) + start[0]
+            )
+            if x < intersection_x:
+                inside = not inside
+        return inside
+
+    @staticmethod
+    def _polygon_centroid(points: Sequence[Point]) -> Point:
+        return (
+            sum(point[0] for point in points) / len(points),
+            sum(point[1] for point in points) / len(points),
+        )
+
+    @classmethod
+    def _nearest_polygon_point(cls, point: Point, points: Sequence[Point]) -> Point:
+        candidates = [
+            cls._project_to_line(point, start, end)
+            for start, end in zip(points, [*points[1:], points[0]])
+        ]
+        return min(candidates, key=lambda item: item[2])[0]
+
     def map_detection(
         self,
         camera_id: str,
         bbox: Tuple[int, int, int, int],
         frame_size: Tuple[int, int],
     ) -> Tuple[str, Point]:
+        if not self.segments:
+            raise ValueError("尚未绘制道路")
         camera = self.ensure_camera(camera_id)
         segment = self.segments.get(camera.segment_id)
         if segment is None:
@@ -419,15 +499,27 @@ class TrafficMapModel:
 
         width, height = frame_size
         bottom_y = min(1.0, max(0.0, bbox[3] / max(1, height)))
+        heading_rad = math.radians(camera.heading)
+        heading_vector = (math.sin(heading_rad), -math.cos(heading_rad))
+        forward_distance = (1.0 - bottom_y) * camera.view_range
+        if segment.geometry_type == "polygon":
+            anchor = (camera.x, camera.y)
+            if not self._point_in_polygon(anchor, segment.points):
+                anchor = self._polygon_centroid(segment.points)
+            candidate = (
+                anchor[0] + heading_vector[0] * forward_distance,
+                anchor[1] + heading_vector[1] * forward_distance,
+            )
+            if not self._point_in_polygon(candidate, segment.points):
+                candidate = self._nearest_polygon_point(candidate, segment.points)
+            return segment.segment_id, candidate
+
         projected, anchor_distance, _, edge_index, _ = self._project_to_polyline(
             (camera.x, camera.y), segment.points
         )
         start, end = segment.points[edge_index], segment.points[edge_index + 1]
         tangent = (end[0] - start[0], end[1] - start[1])
-        heading_rad = math.radians(camera.heading)
-        heading_vector = (math.sin(heading_rad), -math.cos(heading_rad))
         sign = 1.0 if tangent[0] * heading_vector[0] + tangent[1] * heading_vector[1] >= 0 else -1.0
-        forward_distance = (1.0 - bottom_y) * camera.view_range
         total_length = self._polyline_length(segment.points)
         track_distance = min(total_length, max(0.0, anchor_distance + sign * forward_distance))
         return segment.segment_id, self._point_at_distance(segment.points, track_distance)
@@ -472,6 +564,8 @@ class TrafficMapModel:
         now: Optional[float] = None,
     ) -> None:
         now = time.time() if now is None else float(now)
+        if not self.segments:
+            return
         self.ensure_camera(camera_id)
         for fallback_id, detection in enumerate(detections, start=1):
             local_id = int(getattr(detection, "track_id", -1))

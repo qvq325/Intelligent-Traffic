@@ -20,6 +20,9 @@ from .preview_stream import MultiCameraPreviewService
 from .schemas import (
     CameraUpdate,
     DetectionSettingsUpdate,
+    NoParkingReferenceRequest,
+    NoParkingScenePayload,
+    NoParkingStartRequest,
     PauseRequest,
     SegmentPayload,
     SourceSelection,
@@ -164,8 +167,56 @@ def create_app(
             item["id"] for item in runtime.devices
         }:
             raise HTTPException(status_code=422, detail="推理设备不可用")
+        if payload.enabled:
+            runtime.map_analysis.update_detection_settings(enabled=False)
         runtime.video.update_detection_settings(**values)
         return runtime.video.status()["detection"]
+
+    def map_analysis_status() -> dict:
+        analysis = runtime.map_analysis.status()
+        source = analysis.get("active_source")
+        segment = None
+        if source:
+            with runtime.map_lock:
+                camera = runtime.traffic_map.cameras.get(source["id"])
+                road = (
+                    runtime.traffic_map.segments.get(camera.segment_id)
+                    if camera and camera.segment_id
+                    else None
+                )
+                if road:
+                    segment = {"id": road.segment_id, "name": road.name}
+        analysis["segment"] = segment
+        return analysis
+
+    @app.get("/api/map/analysis/status")
+    def get_map_analysis_status() -> dict:
+        return map_analysis_status()
+
+    @app.post("/api/map/analysis/select")
+    def select_map_analysis(payload: SourceSelection) -> dict:
+        url = config.stream_sources.get(payload.source_id)
+        if url is None:
+            raise HTTPException(status_code=404, detail="摄像头不存在")
+        with runtime.map_lock:
+            camera = runtime.traffic_map.cameras.get(payload.source_id)
+            if not camera or camera.segment_id not in runtime.traffic_map.segments:
+                raise HTTPException(status_code=422, detail="摄像头尚未绑定有效道路")
+        runtime.video.update_detection_settings(enabled=False)
+        runtime.map_analysis.select_source(payload.source_id, payload.source_id, url)
+        runtime.map_analysis.update_detection_settings(enabled=True)
+        return map_analysis_status()
+
+    @app.post("/api/map/analysis/pause")
+    def pause_map_analysis(payload: PauseRequest) -> dict:
+        runtime.map_analysis.set_paused(payload.paused)
+        return map_analysis_status()
+
+    @app.post("/api/map/analysis/stop")
+    def stop_map_analysis() -> dict:
+        runtime.map_analysis.update_detection_settings(enabled=False)
+        runtime.map_analysis.stop_stream()
+        return map_analysis_status()
 
     @app.get("/api/video/feed")
     def video_feed() -> StreamingResponse:
@@ -252,6 +303,81 @@ def create_app(
             media_type="image/jpeg",
             headers={"Content-Disposition": f'attachment; filename="snapshot_{timestamp}.jpg"'},
         )
+
+    @app.get("/api/no-parking")
+    def get_no_parking() -> dict:
+        return {
+            **runtime.no_parking.catalog(),
+            "status": runtime.no_parking.status(expire=True),
+        }
+
+    @app.get("/api/no-parking/status")
+    def get_no_parking_status() -> dict:
+        return runtime.no_parking.status(expire=True)
+
+    @app.post("/api/no-parking/reference", status_code=status.HTTP_201_CREATED)
+    def capture_no_parking_reference(payload: NoParkingReferenceRequest) -> dict:
+        stream = runtime.video.status()
+        source = stream.get("active_source")
+        if source is None or source["id"] != payload.camera_id:
+            raise HTTPException(status_code=409, detail="请先连接所选摄像头或关联本地视频")
+        frame = runtime.video.latest_frame()
+        resolution = stream.get("resolution")
+        if frame is None or resolution is None:
+            raise HTTPException(status_code=409, detail="当前没有可用于标定的视频帧")
+        return runtime.no_parking.capture_reference(
+            frame,
+            payload.camera_id,
+            resolution["width"],
+            resolution["height"],
+        )
+
+    @app.get("/api/no-parking/references/{filename}")
+    def get_no_parking_reference(filename: str) -> FileResponse:
+        path = runtime.no_parking.reference_path(filename)
+        if path is None:
+            raise HTTPException(status_code=404, detail="参考帧不存在")
+        return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/no-parking/scenes", status_code=status.HTTP_201_CREATED)
+    def upsert_no_parking_scene(payload: NoParkingScenePayload) -> dict:
+        if payload.camera_id not in config.stream_sources:
+            raise HTTPException(status_code=404, detail="关联摄像头不存在")
+        try:
+            return runtime.no_parking.upsert_scene(payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/api/no-parking/scenes/{scene_id}")
+    def delete_no_parking_scene(scene_id: str) -> dict:
+        if not runtime.no_parking.delete_scene(scene_id):
+            raise HTTPException(status_code=404, detail="禁停场景不存在")
+        return {"deleted": True, "scene_id": scene_id}
+
+    @app.post("/api/no-parking/start")
+    def start_no_parking(payload: NoParkingStartRequest) -> dict:
+        scene = runtime.no_parking.get_scene(payload.scene_id)
+        if scene is None:
+            raise HTTPException(status_code=404, detail="禁停场景不存在")
+        stream = runtime.video.status()
+        source = stream.get("active_source")
+        if source is None or source["id"] != scene["camera_id"]:
+            raise HTTPException(status_code=409, detail="当前视频源与禁停场景不匹配")
+        runtime.map_analysis.update_detection_settings(enabled=False)
+        if source["local"] and not stream["connected"]:
+            runtime.video.restart_source()
+        else:
+            runtime.video.set_paused(False)
+        runtime.video.update_detection_settings(enabled=True)
+        return runtime.no_parking.start(payload.scene_id)
+
+    @app.post("/api/no-parking/stop")
+    def stop_no_parking() -> dict:
+        return runtime.no_parking.stop()
+
+    @app.delete("/api/no-parking/events")
+    def clear_no_parking_events() -> dict:
+        return runtime.no_parking.clear_events()
 
     @app.get("/api/whitelist")
     def get_whitelist() -> dict:
@@ -362,7 +488,10 @@ def create_app(
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
-        return FileResponse(config.frontend_dir / "index.html")
+        return FileResponse(
+            config.frontend_dir / "index.html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     return app
 

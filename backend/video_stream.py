@@ -52,6 +52,7 @@ class VideoStreamService:
     ) -> None:
         self.whitelist_manager = whitelist_manager
         self.on_detections = on_detections
+        self._detection_listeners: list[DetectionCallback] = []
 
         self._condition = threading.Condition(threading.RLock())
         self._stop_event = threading.Event()
@@ -132,6 +133,19 @@ class VideoStreamService:
             self._clear_frame_locked()
             self._condition.notify_all()
 
+    def restart_source(self) -> bool:
+        """Reopen the selected source, primarily for completed local files."""
+        with self._condition:
+            if self._requested_source is None:
+                return False
+            self._source_revision += 1
+            self._paused = False
+            self._connected = False
+            self._message = f"正在重新打开 {self._requested_source.display_name} ..."
+            self._clear_frame_locked()
+            self._condition.notify_all()
+            return True
+
     def set_paused(self, paused: bool) -> None:
         with self._condition:
             self._paused = bool(paused)
@@ -172,6 +186,12 @@ class VideoStreamService:
             elif self._processor is None or self._processor_device != self._settings.device:
                 self._detection_status = "等待加载模型"
             self._condition.notify_all()
+
+    def add_detection_listener(self, listener: DetectionCallback) -> None:
+        """Register an additional consumer without changing the primary callback."""
+        with self._condition:
+            if listener not in self._detection_listeners:
+                self._detection_listeners.append(listener)
 
     def status(self) -> dict:
         with self._condition:
@@ -384,13 +404,17 @@ class VideoStreamService:
         result_list = list(results)
         with self._condition:
             self._results = [serialize_detection(result) for result in result_list]
-        if source is None or self.on_detections is None:
+            listeners = list(self._detection_listeners)
+            primary_callback = self.on_detections
+        if source is None:
             return
         height, width = frame.shape[:2]
-        try:
-            self.on_detections(source.name, result_list, (width, height))
-        except Exception as exc:
-            self._set_detection_status(f"地图更新异常: {exc}")
+        callbacks = ([primary_callback] if primary_callback else []) + listeners
+        for callback in callbacks:
+            try:
+                callback(source.name, result_list, (width, height))
+            except Exception as exc:
+                self._set_detection_status(f"检测结果处理异常: {exc}")
 
     def _publish_frame(self, frame: np.ndarray) -> None:
         ok, encoded = cv2.imencode(

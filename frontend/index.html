@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>沙盘交通智控台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/styles.css?v=20260713-4">
+  <link rel="stylesheet" href="/static/styles.css?v=20260713-5">
 </head>
 <body>
   <div class="app-shell">
@@ -36,6 +36,9 @@
         </button>
         <button class="nav-button" data-view="no-parking" type="button">
           <i data-lucide="octagon-alert"></i><span>禁停监控</span>
+        </button>
+        <button class="nav-button" data-view="road-abnormal" type="button">
+          <i data-lucide="triangle-alert"></i><span>道路异常</span>
         </button>
         <button class="nav-button" data-view="whitelist" type="button">
           <i data-lucide="shield-check"></i><span>白名单</span>
@@ -529,6 +532,154 @@
         </div>
       </section>
 
+      <section class="view" id="view-road-abnormal" aria-labelledby="road-abnormal-title">
+        <div class="page-toolbar no-parking-toolbar">
+          <div class="toolbar-title">
+            <h2 id="road-abnormal-title">道路异常检测</h2>
+            <span class="muted" id="road-abnormal-summary">尚未配置监控场景</span>
+          </div>
+          <div class="no-parking-run-state" aria-live="polite">
+            <i class="status-dot" id="road-abnormal-status-dot" aria-hidden="true"></i>
+            <strong id="road-abnormal-status-label">未启动</strong>
+          </div>
+          <div class="toolbar-actions">
+            <button class="command-button primary" id="road-abnormal-start-button" type="button" disabled>
+              <i data-lucide="play"></i><span>启动检测</span>
+            </button>
+            <button class="command-button danger subtle" id="road-abnormal-stop-button" type="button" disabled>
+              <i data-lucide="square"></i><span>停止</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="workflow-strip" aria-label="道路异常检测配置进度">
+          <div data-road-abnormal-step="source"><i>1</i><span>视频源</span></div>
+          <div data-road-abnormal-step="reference"><i>2</i><span>固定画面</span></div>
+          <div data-road-abnormal-step="zone"><i>3</i><span>车道区域</span></div>
+          <div data-road-abnormal-step="monitor"><i>4</i><span>异常检测</span></div>
+        </div>
+
+        <div class="no-parking-layout road-abnormal-layout">
+          <section class="video-workspace no-parking-workspace" aria-label="道路异常检测画面">
+            <div class="workspace-head no-parking-source-bar">
+              <div class="source-identity">
+                <span class="live-badge" id="road-abnormal-source-badge">待机</span>
+                <strong id="road-abnormal-source-name">未选择视频源</strong>
+              </div>
+              <div class="stream-controls">
+                <label class="select-wrap source-select">
+                  <span class="sr-only">道路异常视频源</span>
+                  <select id="road-abnormal-source-select" aria-label="道路异常视频源"></select>
+                </label>
+                <button class="icon-button primary" id="road-abnormal-connect-button" type="button" title="连接视频源">
+                  <i data-lucide="play"></i>
+                </button>
+                <button class="icon-button" id="road-abnormal-upload-button" type="button" title="打开本地视频">
+                  <i data-lucide="folder-open"></i>
+                </button>
+                <input id="road-abnormal-file-input" type="file" accept="video/*" hidden>
+              </div>
+            </div>
+
+            <div class="no-parking-stage" id="road-abnormal-stage">
+              <img id="road-abnormal-feed" alt="道路异常检测实时画面">
+              <img id="road-abnormal-reference" alt="道路异常检测参考帧" hidden>
+              <canvas id="road-abnormal-canvas" aria-label="车道检测区域绘制画布"></canvas>
+              <div class="video-empty" id="road-abnormal-empty">
+                <i data-lucide="video-off"></i>
+                <strong>暂无视频画面</strong>
+                <span>连接摄像头或打开本地视频</span>
+              </div>
+              <div class="roi-toolstrip">
+                <button class="icon-button small" id="road-abnormal-draw-button" type="button" title="绘制车道检测区域" disabled>
+                  <i data-lucide="pentagon"></i>
+                </button>
+                <button class="icon-button small primary" id="road-abnormal-finish-draw-button" type="button" title="完成绘制" disabled>
+                  <i data-lucide="check"></i>
+                </button>
+                <button class="icon-button small" id="road-abnormal-undo-button" type="button" title="撤销节点" disabled>
+                  <i data-lucide="undo-2"></i>
+                </button>
+                <button class="icon-button small danger-ghost" id="road-abnormal-clear-zone-button" type="button" title="清除区域" disabled>
+                  <i data-lucide="eraser"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="metrics-strip no-parking-metrics">
+              <div><span>检测区域</span><strong id="road-abnormal-zone-count">0</strong></div>
+              <div><span>当前候选</span><strong id="road-abnormal-candidate-count">0</strong></div>
+              <div><span>活动告警</span><strong id="road-abnormal-alarm-count">0</strong></div>
+              <div><span>累计事件</span><strong id="road-abnormal-event-count">0</strong></div>
+            </div>
+          </section>
+
+          <aside class="inspector no-parking-inspector">
+            <div class="segmented-tabs" role="tablist">
+              <button class="active" data-road-abnormal-tab="config" type="button">场景配置</button>
+              <button data-road-abnormal-tab="results" type="button">检测结果</button>
+            </div>
+
+            <form class="inspector-pane active editor-form" id="road-abnormal-config-form">
+              <div class="pane-heading">
+                <h3>固定机位档案</h3>
+                <div class="pane-actions">
+                  <button class="icon-button small" id="road-abnormal-new-scene-button" type="button" title="新建场景"><i data-lucide="plus"></i></button>
+                  <button class="icon-button small danger-ghost" id="road-abnormal-delete-scene-button" type="button" title="删除场景" disabled><i data-lucide="trash-2"></i></button>
+                </div>
+              </div>
+              <label class="field"><span>已保存场景</span><select id="road-abnormal-scene-select"><option value="">新建场景</option></select></label>
+              <label class="field"><span>场景名称</span><input id="road-abnormal-scene-name" type="text" maxlength="100" value="道路异常监控场景" required></label>
+              <div class="field-row">
+                <label class="field"><span>区域名称</span><input id="road-abnormal-zone-name" type="text" maxlength="100" value="道路检测区域" required></label>
+                <label class="field"><span>受影响车道</span><input id="road-abnormal-lane-name" type="text" maxlength="100" value="机动车道" required></label>
+              </div>
+              <div class="field-row">
+                <label class="field"><span>持续阈值（秒）</span><input id="road-abnormal-persistence" type="number" min="0.1" max="300" step="0.1" value="3" required></label>
+                <label class="field"><span>丢失容忍（秒）</span><input id="road-abnormal-lost" type="number" min="0.1" max="30" step="0.1" value="1" required></label>
+              </div>
+              <div class="field-row">
+                <label class="field"><span>最小画面占比</span><input id="road-abnormal-min-area" type="number" min="0.00001" max="0.25" step="0.0001" value="0.001" required></label>
+                <label class="field"><span>MOG2 变化阈值</span><input id="road-abnormal-variance" type="number" min="1" max="255" step="1" value="25" required></label>
+              </div>
+              <div class="field-row">
+                <label class="field"><span>背景预热（帧）</span><input id="road-abnormal-warmup" type="number" min="0" max="1000" step="1" value="30" required></label>
+                <label class="field"><span>YOLO 阈值</span><input id="road-abnormal-yolo" type="number" min="0.05" max="1" step="0.05" value="0.45" required></label>
+              </div>
+              <label class="switch-field compact road-abnormal-shadow-field">
+                <input id="road-abnormal-shadows" type="checkbox" checked>
+                <span class="switch" aria-hidden="true"></span>
+                <span>启用阴影过滤</span>
+              </label>
+              <div class="reference-status"><span>标定画面</span><strong id="road-abnormal-reference-status">绘制时自动冻结</strong></div>
+              <div class="form-actions">
+                <button class="command-button primary" id="road-abnormal-save-button" type="submit" disabled><i data-lucide="save"></i><span>保存场景</span></button>
+              </div>
+            </form>
+
+            <div class="inspector-pane no-parking-results-pane" id="road-abnormal-results-pane">
+              <section>
+                <div class="pane-heading"><h3>当前异常候选</h3><span class="count-badge" id="road-abnormal-active-count">0</span></div>
+                <div class="table-scroll no-parking-track-scroll">
+                  <table><thead><tr><th>目标</th><th>车道</th><th>持续</th><th>状态</th></tr></thead><tbody id="road-abnormal-candidate-body"></tbody></table>
+                  <div class="empty-table" id="road-abnormal-candidate-empty">当前没有异常候选</div>
+                </div>
+              </section>
+              <section class="event-section">
+                <div class="pane-heading">
+                  <h3>道路异常告警</h3>
+                  <button class="icon-button small danger-ghost" id="road-abnormal-clear-events-button" type="button" title="清空事件"><i data-lucide="trash-2"></i></button>
+                </div>
+                <div class="table-scroll no-parking-event-scroll">
+                  <table><thead><tr><th>时间</th><th>类型</th><th>车道</th><th>快照</th></tr></thead><tbody id="road-abnormal-event-body"></tbody></table>
+                  <div class="empty-table" id="road-abnormal-event-empty">暂无道路异常事件</div>
+                </div>
+              </section>
+            </div>
+          </aside>
+        </div>
+      </section>
+
       <section class="view" id="view-whitelist" aria-labelledby="whitelist-title">
         <div class="page-toolbar">
           <div class="toolbar-title">
@@ -570,6 +721,6 @@
   <div class="toast-region" id="toast-region" aria-live="polite"></div>
 
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script type="module" src="/static/js/app.js?v=20260713-9"></script>
+  <script type="module" src="/static/js/app.js?v=20260713-12"></script>
 </body>
 </html>

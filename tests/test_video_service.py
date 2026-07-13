@@ -51,3 +51,22 @@ def test_video_service_can_restart_the_selected_local_source():
 
     service.stop_stream()
     assert service.restart_source() is False
+
+
+def test_video_service_applies_optional_frame_processor():
+    calls = []
+
+    def processor(camera_id, frame):
+        calls.append(camera_id)
+        processed = frame.copy()
+        processed[:, :, 2] = 255
+        return processed
+
+    service = VideoStreamService(WhitelistManager(), frame_processor=processor)
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+
+    result = service.frame_processor("camera-1", frame)
+
+    assert calls == ["camera-1"]
+    assert result[0, 0, 2] == 255
+    assert frame[0, 0, 2] == 0

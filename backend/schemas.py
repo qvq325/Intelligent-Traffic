@@ -92,3 +92,54 @@ class NoParkingScenePayload(ApiModel):
 
 class NoParkingStartRequest(ApiModel):
     scene_id: str = Field(min_length=1, max_length=80)
+
+
+RoadObjectClass = Literal["person", "bicycle", "car", "motorcycle", "bus", "truck"]
+
+
+class RoadAbnormalReferenceRequest(ApiModel):
+    camera_id: str = Field(min_length=1, max_length=100)
+
+
+class RoadAbnormalZonePayload(ApiModel):
+    zone_id: str = Field(default="", max_length=80)
+    name: str = Field(default="道路检测区域", min_length=1, max_length=100)
+    lane_name: str = Field(default="机动车道", min_length=1, max_length=100)
+    points: Annotated[list[Point], Field(min_length=3, max_length=100)]
+    enabled: bool = True
+
+
+class RoadAbnormalScenePayload(ApiModel):
+    scene_id: str = Field(default="", max_length=80)
+    name: str = Field(min_length=1, max_length=100)
+    camera_id: str = Field(min_length=1, max_length=100)
+    reference_image: str = Field(
+        default="", max_length=120, pattern=r"^$|^[A-Za-z0-9_-]+\.jpg$"
+    )
+    reference_width: int = Field(default=0, ge=0, le=10000)
+    reference_height: int = Field(default=0, ge=0, le=10000)
+    zones: Annotated[list[RoadAbnormalZonePayload], Field(min_length=1, max_length=20)]
+    persistence_seconds: float = Field(default=3.0, ge=0.1, le=300.0)
+    lost_tolerance_seconds: float = Field(default=1.0, ge=0.1, le=30.0)
+    min_area_ratio: float = Field(default=0.001, ge=0.00001, le=0.25)
+    history: int = Field(default=500, ge=10, le=5000)
+    variance_threshold: float = Field(default=25.0, ge=1.0, le=255.0)
+    detect_shadows: bool = True
+    warmup_frames: int = Field(default=30, ge=0, le=1000)
+    learning_rate: float = Field(default=0.002, ge=-1.0, le=1.0)
+    inference_interval: int = Field(default=5, ge=1, le=60)
+    yolo_threshold: float = Field(default=0.45, ge=0.05, le=1.0)
+    anomaly_classes: list[RoadObjectClass] = Field(
+        default_factory=lambda: ["person", "bicycle", "motorcycle"],
+        min_length=1,
+        max_length=6,
+    )
+    normal_classes: list[RoadObjectClass] = Field(
+        default_factory=lambda: ["car", "bus", "truck"],
+        min_length=1,
+        max_length=6,
+    )
+
+
+class RoadAbnormalStartRequest(ApiModel):
+    scene_id: str = Field(min_length=1, max_length=80)

@@ -24,6 +24,9 @@ from .schemas import (
     NoParkingScenePayload,
     NoParkingStartRequest,
     PauseRequest,
+    RoadAbnormalReferenceRequest,
+    RoadAbnormalScenePayload,
+    RoadAbnormalStartRequest,
     SegmentPayload,
     SourceSelection,
     WhitelistEnabledUpdate,
@@ -124,6 +127,7 @@ def create_app(
         if url is None:
             raise HTTPException(status_code=404, detail="视频源不存在")
         preview_stream.cancel_prewarm()
+        runtime.road_abnormal.stop()
         runtime.video.select_source(payload.source_id, payload.source_id, url)
         return runtime.video.status()
 
@@ -142,6 +146,7 @@ def create_app(
         )
         source_id = camera_id or next(iter(config.stream_sources), "本地视频")
         preview_stream.cancel_prewarm()
+        runtime.road_abnormal.stop()
         runtime.video.select_source(
             source_id,
             source_id,
@@ -168,6 +173,7 @@ def create_app(
         }:
             raise HTTPException(status_code=422, detail="推理设备不可用")
         if payload.enabled:
+            runtime.road_abnormal.stop()
             runtime.map_analysis.update_detection_settings(enabled=False)
         runtime.video.update_detection_settings(**values)
         return runtime.video.status()["detection"]
@@ -363,6 +369,7 @@ def create_app(
         source = stream.get("active_source")
         if source is None or source["id"] != scene["camera_id"]:
             raise HTTPException(status_code=409, detail="当前视频源与禁停场景不匹配")
+        runtime.road_abnormal.stop()
         runtime.map_analysis.update_detection_settings(enabled=False)
         if source["local"] and not stream["connected"]:
             runtime.video.restart_source()
@@ -378,6 +385,115 @@ def create_app(
     @app.delete("/api/no-parking/events")
     def clear_no_parking_events() -> dict:
         return runtime.no_parking.clear_events()
+
+    @app.get("/api/road-abnormal")
+    def get_road_abnormal() -> dict:
+        return {
+            **runtime.road_abnormal.catalog(),
+            "status": runtime.road_abnormal.status(expire=True),
+        }
+
+    @app.get("/api/road-abnormal/status")
+    def get_road_abnormal_status() -> dict:
+        return runtime.road_abnormal.status(expire=True)
+
+    @app.post("/api/road-abnormal/reference", status_code=status.HTTP_201_CREATED)
+    def capture_road_abnormal_reference(
+        payload: RoadAbnormalReferenceRequest,
+    ) -> dict:
+        stream = runtime.video.status()
+        source = stream.get("active_source")
+        if source is None or source["id"] != payload.camera_id:
+            raise HTTPException(status_code=409, detail="请先连接所选摄像头或关联本地视频")
+        frame = runtime.video.latest_frame()
+        resolution = stream.get("resolution")
+        if frame is None or resolution is None:
+            raise HTTPException(status_code=409, detail="当前没有可用于标定的视频帧")
+        return runtime.road_abnormal.capture_reference(
+            frame,
+            payload.camera_id,
+            resolution["width"],
+            resolution["height"],
+        )
+
+    @app.get("/api/road-abnormal/references/{filename}")
+    def get_road_abnormal_reference(filename: str) -> FileResponse:
+        path = runtime.road_abnormal.reference_path(filename)
+        if path is None:
+            raise HTTPException(status_code=404, detail="参考帧不存在")
+        return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/road-abnormal/snapshots/{filename}")
+    def get_road_abnormal_snapshot(filename: str) -> FileResponse:
+        path = runtime.road_abnormal.snapshot_path(filename)
+        if path is None:
+            raise HTTPException(status_code=404, detail="异常快照不存在")
+        return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/road-abnormal/scenes", status_code=status.HTTP_201_CREATED)
+    def upsert_road_abnormal_scene(payload: RoadAbnormalScenePayload) -> dict:
+        if payload.camera_id not in config.stream_sources:
+            raise HTTPException(status_code=404, detail="关联摄像头不存在")
+        values = payload.model_dump()
+        if not values["reference_image"]:
+            stream = runtime.video.status()
+            source = stream.get("active_source")
+            if source is None or source["id"] != payload.camera_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="请先连接所选摄像头或关联本地视频",
+                )
+            frame = runtime.video.latest_frame()
+            resolution = stream.get("resolution")
+            if frame is None or resolution is None:
+                raise HTTPException(status_code=409, detail="当前没有可用于标定的视频帧")
+            reference = runtime.road_abnormal.capture_reference(
+                frame,
+                payload.camera_id,
+                resolution["width"],
+                resolution["height"],
+            )
+            values.update(
+                reference_image=reference["filename"],
+                reference_width=reference["width"],
+                reference_height=reference["height"],
+            )
+        try:
+            return runtime.road_abnormal.upsert_scene(values)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/api/road-abnormal/scenes/{scene_id}")
+    def delete_road_abnormal_scene(scene_id: str) -> dict:
+        if not runtime.road_abnormal.delete_scene(scene_id):
+            raise HTTPException(status_code=404, detail="道路异常场景不存在")
+        return {"deleted": True, "scene_id": scene_id}
+
+    @app.post("/api/road-abnormal/start")
+    def start_road_abnormal(payload: RoadAbnormalStartRequest) -> dict:
+        scene = runtime.road_abnormal.get_scene(payload.scene_id)
+        if scene is None:
+            raise HTTPException(status_code=404, detail="道路异常场景不存在")
+        stream = runtime.video.status()
+        source = stream.get("active_source")
+        if source is None or source["id"] != scene["camera_id"]:
+            raise HTTPException(status_code=409, detail="当前视频源与道路异常场景不匹配")
+        runtime.no_parking.stop()
+        runtime.map_analysis.update_detection_settings(enabled=False)
+        runtime.video.update_detection_settings(enabled=False)
+        if source["local"] and not stream["connected"]:
+            runtime.video.restart_source()
+        else:
+            runtime.video.set_paused(False)
+        return runtime.road_abnormal.start(payload.scene_id)
+
+    @app.post("/api/road-abnormal/stop")
+    def stop_road_abnormal() -> dict:
+        return runtime.road_abnormal.stop()
+
+    @app.delete("/api/road-abnormal/events")
+    def clear_road_abnormal_events() -> dict:
+        return runtime.road_abnormal.clear_events()
 
     @app.get("/api/whitelist")
     def get_whitelist() -> dict:

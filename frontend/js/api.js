@@ -70,6 +70,27 @@ export const api = {
   stopNoParking: () => request("/api/no-parking/stop", { method: "POST" }),
   clearNoParkingEvents: () => request("/api/no-parking/events", { method: "DELETE" }),
 
+  roadAbnormal: () => request("/api/road-abnormal"),
+  roadAbnormalStatus: () => request("/api/road-abnormal/status"),
+  captureRoadAbnormalReference: (cameraId) => request(
+    "/api/road-abnormal/reference",
+    json("POST", { camera_id: cameraId }),
+  ),
+  saveRoadAbnormalScene: (scene) => request(
+    "/api/road-abnormal/scenes",
+    json("POST", scene),
+  ),
+  deleteRoadAbnormalScene: (sceneId) => request(
+    `/api/road-abnormal/scenes/${encodeURIComponent(sceneId)}`,
+    { method: "DELETE" },
+  ),
+  startRoadAbnormal: (sceneId) => request(
+    "/api/road-abnormal/start",
+    json("POST", { scene_id: sceneId }),
+  ),
+  stopRoadAbnormal: () => request("/api/road-abnormal/stop", { method: "POST" }),
+  clearRoadAbnormalEvents: () => request("/api/road-abnormal/events", { method: "DELETE" }),
+
   whitelist: () => request("/api/whitelist"),
   saveWhitelist: (entry) => request("/api/whitelist", json("POST", entry)),
   deleteWhitelist: (plate) => request(`/api/whitelist/${encodeURIComponent(plate)}`, { method: "DELETE" }),

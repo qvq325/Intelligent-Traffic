@@ -17,6 +17,7 @@ from whitelist_manager import WhitelistManager
 
 
 DetectionCallback = Callable[[str, list[DetectionResult], tuple[int, int]], None]
+FrameProcessor = Callable[[str, np.ndarray], np.ndarray]
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,9 +50,11 @@ class VideoStreamService:
         self,
         whitelist_manager: WhitelistManager,
         on_detections: DetectionCallback | None = None,
+        frame_processor: FrameProcessor | None = None,
     ) -> None:
         self.whitelist_manager = whitelist_manager
         self.on_detections = on_detections
+        self.frame_processor = frame_processor
         self._detection_listeners: list[DetectionCallback] = []
 
         self._condition = threading.Condition(threading.RLock())
@@ -347,6 +350,12 @@ class VideoStreamService:
                     annotated = frame
             elif settings.enabled and last_results:
                 annotated = self._draw_cached_results(frame, last_results)
+
+            if active_source is not None and self.frame_processor is not None:
+                try:
+                    annotated = self.frame_processor(active_source.name, annotated)
+                except Exception as exc:
+                    self._set_detection_status(f"画面分析异常: {exc}")
 
             self._publish_frame(annotated)
 

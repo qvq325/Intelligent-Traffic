@@ -1623,6 +1623,16 @@ tbody tr.selected {
   box-shadow: 0 0 0 3px rgb(223 95 97 / 16%);
 }
 
+#road-abnormal-status-dot.running {
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgb(57 184 121 / 16%);
+}
+
+#road-abnormal-status-dot.alarm {
+  background: var(--red);
+  box-shadow: 0 0 0 3px rgb(223 95 97 / 16%);
+}
+
 .workflow-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(100px, 1fr));
@@ -2035,6 +2045,15 @@ tbody tr.selected {
   border-color: rgb(223 95 97 / 30%);
 }
 
+.road-abnormal-shadow-field {
+  margin: 8px 14px 2px;
+}
+
+.road-abnormal-snapshot {
+  width: 28px;
+  height: 28px;
+}
+
 @media (max-width: 1180px) {
   .monitor-toolbar {
     grid-template-columns: minmax(120px, 1fr) auto auto minmax(110px, auto);
@@ -2092,7 +2111,7 @@ tbody tr.selected {
   .sidebar nav {
     display: grid;
     height: 51px;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 4px;
   }
 

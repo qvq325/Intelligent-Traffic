@@ -6,6 +6,11 @@ export class VideoRegionEditor {
     this.frame = frame;
     this.context = canvas.getContext("2d");
     this.callbacks = callbacks;
+    this.labels = {
+      idle: callbacks.labels?.idle || "禁停区域",
+      running: callbacks.labels?.running || "监测中",
+      alarm: callbacks.labels?.alarm || "违规停留",
+    };
     this.media = null;
     this.points = [];
     this.previousPoints = [];
@@ -231,7 +236,7 @@ export class VideoRegionEditor {
     if (!this.drawing && points.length >= 3) {
       const left = Math.min(...points.map((point) => point.x));
       const top = Math.min(...points.map((point) => point.y));
-      const label = this.alarm ? "违规停留" : this.running ? "监测中" : "禁停区域";
+      const label = this.labels[this.alarm ? "alarm" : this.running ? "running" : "idle"];
       this.context.font = '600 12px "Microsoft YaHei UI", sans-serif';
       const width = this.context.measureText(label).width + 16;
       this.context.fillStyle = color;

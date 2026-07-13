@@ -1,6 +1,6 @@
 import { api } from "./api.js?v=20260713-1";
 import { TrafficMapCanvas } from "./map-canvas.js?v=20260712-4";
-import { VideoRegionEditor } from "./no-parking-canvas.js?v=20260713-1";
+import { VideoRegionEditor } from "./no-parking-canvas.js?v=20260713-2";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -97,6 +97,52 @@ const elements = {
   noParkingEventEmpty: $("#no-parking-event-empty"),
   noParkingClearEventsButton: $("#no-parking-clear-events-button"),
 
+  roadAbnormalSummary: $("#road-abnormal-summary"),
+  roadAbnormalStatusDot: $("#road-abnormal-status-dot"),
+  roadAbnormalStatusLabel: $("#road-abnormal-status-label"),
+  roadAbnormalStartButton: $("#road-abnormal-start-button"),
+  roadAbnormalStopButton: $("#road-abnormal-stop-button"),
+  roadAbnormalSourceSelect: $("#road-abnormal-source-select"),
+  roadAbnormalConnectButton: $("#road-abnormal-connect-button"),
+  roadAbnormalUploadButton: $("#road-abnormal-upload-button"),
+  roadAbnormalFileInput: $("#road-abnormal-file-input"),
+  roadAbnormalSourceBadge: $("#road-abnormal-source-badge"),
+  roadAbnormalSourceName: $("#road-abnormal-source-name"),
+  roadAbnormalStage: $("#road-abnormal-stage"),
+  roadAbnormalFeed: $("#road-abnormal-feed"),
+  roadAbnormalReference: $("#road-abnormal-reference"),
+  roadAbnormalEmpty: $("#road-abnormal-empty"),
+  roadAbnormalDrawButton: $("#road-abnormal-draw-button"),
+  roadAbnormalFinishDrawButton: $("#road-abnormal-finish-draw-button"),
+  roadAbnormalUndoButton: $("#road-abnormal-undo-button"),
+  roadAbnormalClearZoneButton: $("#road-abnormal-clear-zone-button"),
+  roadAbnormalZoneCount: $("#road-abnormal-zone-count"),
+  roadAbnormalCandidateCount: $("#road-abnormal-candidate-count"),
+  roadAbnormalAlarmCount: $("#road-abnormal-alarm-count"),
+  roadAbnormalEventCount: $("#road-abnormal-event-count"),
+  roadAbnormalConfigForm: $("#road-abnormal-config-form"),
+  roadAbnormalSceneSelect: $("#road-abnormal-scene-select"),
+  roadAbnormalNewSceneButton: $("#road-abnormal-new-scene-button"),
+  roadAbnormalDeleteSceneButton: $("#road-abnormal-delete-scene-button"),
+  roadAbnormalSceneName: $("#road-abnormal-scene-name"),
+  roadAbnormalZoneName: $("#road-abnormal-zone-name"),
+  roadAbnormalLaneName: $("#road-abnormal-lane-name"),
+  roadAbnormalPersistence: $("#road-abnormal-persistence"),
+  roadAbnormalLost: $("#road-abnormal-lost"),
+  roadAbnormalMinArea: $("#road-abnormal-min-area"),
+  roadAbnormalVariance: $("#road-abnormal-variance"),
+  roadAbnormalWarmup: $("#road-abnormal-warmup"),
+  roadAbnormalYolo: $("#road-abnormal-yolo"),
+  roadAbnormalShadows: $("#road-abnormal-shadows"),
+  roadAbnormalReferenceStatus: $("#road-abnormal-reference-status"),
+  roadAbnormalSaveButton: $("#road-abnormal-save-button"),
+  roadAbnormalActiveCount: $("#road-abnormal-active-count"),
+  roadAbnormalCandidateBody: $("#road-abnormal-candidate-body"),
+  roadAbnormalCandidateEmpty: $("#road-abnormal-candidate-empty"),
+  roadAbnormalEventBody: $("#road-abnormal-event-body"),
+  roadAbnormalEventEmpty: $("#road-abnormal-event-empty"),
+  roadAbnormalClearEventsButton: $("#road-abnormal-clear-events-button"),
+
   mapSummary: $("#map-summary"),
   mapFrame: $("#map-frame"),
   mapBackground: $("#map-background"),
@@ -190,6 +236,13 @@ const state = {
   noParkingPoints: [],
   noParkingDrawing: false,
   noParkingBusy: false,
+  roadAbnormalCatalog: [],
+  roadAbnormalStatus: null,
+  roadAbnormalSceneId: "",
+  roadAbnormalReference: null,
+  roadAbnormalPoints: [],
+  roadAbnormalDrawing: false,
+  roadAbnormalBusy: false,
 };
 
 const MULTI_CAMERA_PAGE_SIZE = 6;
@@ -247,6 +300,31 @@ const noParkingTopologyCanvas = new TrafficMapCanvas(
       );
       const scene = preferred || state.noParkingCatalog.find((item) => item.camera_id === cameraId);
       if (scene) openNoParkingTopologyScene(scene.scene_id).catch(reportError);
+    },
+  },
+);
+
+const roadAbnormalCanvas = new VideoRegionEditor(
+  $("#road-abnormal-canvas"),
+  elements.roadAbnormalStage,
+  {
+    labels: {
+      idle: "道路检测区域",
+      running: "异常检测中",
+      alarm: "道路异常",
+    },
+    onChange: (points) => {
+      state.roadAbnormalPoints = points;
+      renderRoadAbnormalControls();
+    },
+    onComplete: (points) => {
+      state.roadAbnormalPoints = points;
+      renderRoadAbnormalControls();
+      showToast("车道检测区域已完成", "success");
+    },
+    onModeChange: (drawing) => {
+      state.roadAbnormalDrawing = drawing;
+      renderRoadAbnormalControls();
     },
   },
 );
@@ -333,10 +411,17 @@ function switchView(viewName) {
     noParkingCanvas.resize();
     loadNoParking({ syncEditor: true }).catch(reportError);
     ensureNoParkingFeed(true);
+  } else if (viewName === "road-abnormal") {
+    roadAbnormalCanvas.resize();
+    loadRoadAbnormal({ syncEditor: true }).catch(reportError);
+    ensureRoadAbnormalFeed(true);
   } else if (viewName === "whitelist") {
     loadWhitelist().catch(reportError);
   }
   if (previousView === "no-parking" && viewName !== "no-parking") stopNoParkingFeed();
+  if (previousView === "road-abnormal" && viewName !== "road-abnormal") {
+    stopRoadAbnormalFeed();
+  }
 }
 
 function activateMonitorTab(tabName) {
@@ -363,14 +448,26 @@ function activateNoParkingTab(tabName) {
   $("#no-parking-results-pane").classList.toggle("active", tabName === "results");
 }
 
+function activateRoadAbnormalTab(tabName) {
+  $$('[data-road-abnormal-tab]').forEach((button) => {
+    button.classList.toggle("active", button.dataset.roadAbnormalTab === tabName);
+  });
+  elements.roadAbnormalConfigForm.classList.toggle("active", tabName === "config");
+  $("#road-abnormal-results-pane").classList.toggle("active", tabName === "results");
+}
+
 function populateSystem(system) {
   state.system = system;
   const currentSource = elements.sourceSelect.value;
   const currentNoParkingSource = elements.noParkingSourceSelect.value;
+  const currentRoadAbnormalSource = elements.roadAbnormalSourceSelect.value;
   elements.sourceSelect.replaceChildren(
     ...system.sources.map((source) => option(source.id, source.name)),
   );
   elements.noParkingSourceSelect.replaceChildren(
+    ...system.sources.map((source) => option(source.id, source.name)),
+  );
+  elements.roadAbnormalSourceSelect.replaceChildren(
     ...system.sources.map((source) => option(source.id, source.name)),
   );
   if (system.sources.some((source) => source.id === currentSource)) {
@@ -378,6 +475,9 @@ function populateSystem(system) {
   }
   if (system.sources.some((source) => source.id === currentNoParkingSource)) {
     elements.noParkingSourceSelect.value = currentNoParkingSource;
+  }
+  if (system.sources.some((source) => source.id === currentRoadAbnormalSource)) {
+    elements.roadAbnormalSourceSelect.value = currentRoadAbnormalSource;
   }
 
   elements.deviceSelect.replaceChildren(
@@ -1446,6 +1546,433 @@ async function clearNoParkingEvents() {
   showToast("事件记录已清空", "success");
 }
 
+function currentRoadAbnormalScene() {
+  return state.roadAbnormalCatalog.find(
+    (scene) => scene.scene_id === state.roadAbnormalSceneId,
+  ) || null;
+}
+
+function ensureRoadAbnormalFeed(force = false) {
+  const sourceId = state.stream?.active_source?.id;
+  if (!sourceId || state.activeView !== "road-abnormal") return;
+  const sourceChanged = elements.roadAbnormalFeed.dataset.sourceId !== sourceId;
+  if (!force && !sourceChanged && elements.roadAbnormalFeed.getAttribute("src")) return;
+  elements.roadAbnormalFeed.dataset.sourceId = sourceId;
+  elements.roadAbnormalFeed.src = `/api/video/feed?road_abnormal=${Date.now()}`;
+}
+
+function stopRoadAbnormalFeed() {
+  elements.roadAbnormalFeed.removeAttribute("src");
+  delete elements.roadAbnormalFeed.dataset.sourceId;
+}
+
+function showRoadAbnormalLive() {
+  elements.roadAbnormalReference.hidden = true;
+  elements.roadAbnormalFeed.hidden = false;
+  roadAbnormalCanvas.setMedia(elements.roadAbnormalFeed);
+  ensureRoadAbnormalFeed(true);
+}
+
+function showRoadAbnormalReference(reference) {
+  state.roadAbnormalReference = reference;
+  elements.roadAbnormalFeed.hidden = true;
+  elements.roadAbnormalReference.hidden = false;
+  elements.roadAbnormalReference.src = `${reference.url}?v=${reference.captured_at || Date.now()}`;
+  elements.roadAbnormalEmpty.hidden = true;
+  roadAbnormalCanvas.setMedia(elements.roadAbnormalReference);
+}
+
+function renderRoadAbnormalSceneOptions() {
+  const selected = state.roadAbnormalSceneId;
+  elements.roadAbnormalSceneSelect.replaceChildren(
+    option("", "新建场景"),
+    ...state.roadAbnormalCatalog.map((scene) => option(scene.scene_id, scene.name)),
+  );
+  elements.roadAbnormalSceneSelect.value = state.roadAbnormalCatalog.some(
+    (scene) => scene.scene_id === selected,
+  ) ? selected : "";
+}
+
+function selectRoadAbnormalScene(sceneId) {
+  state.roadAbnormalSceneId = sceneId || "";
+  const scene = currentRoadAbnormalScene();
+  const zone = scene?.zones?.[0] || null;
+  elements.roadAbnormalSceneSelect.value = scene?.scene_id || "";
+  elements.roadAbnormalSceneName.value = scene?.name || "道路异常监控场景";
+  elements.roadAbnormalZoneName.value = zone?.name || "道路检测区域";
+  elements.roadAbnormalLaneName.value = zone?.lane_name || "机动车道";
+  elements.roadAbnormalPersistence.value = scene?.persistence_seconds || 3;
+  elements.roadAbnormalLost.value = scene?.lost_tolerance_seconds || 1;
+  elements.roadAbnormalMinArea.value = scene?.min_area_ratio || 0.001;
+  elements.roadAbnormalVariance.value = scene?.variance_threshold || 25;
+  elements.roadAbnormalWarmup.value = scene?.warmup_frames ?? 30;
+  elements.roadAbnormalYolo.value = scene?.yolo_threshold || 0.45;
+  elements.roadAbnormalShadows.checked = scene?.detect_shadows ?? true;
+  if (scene && state.system?.sources.some((source) => source.id === scene.camera_id)) {
+    elements.roadAbnormalSourceSelect.value = scene.camera_id;
+  }
+
+  state.roadAbnormalPoints = zone?.points || [];
+  roadAbnormalCanvas.setPoints(state.roadAbnormalPoints);
+  if (scene?.reference_url) {
+    showRoadAbnormalReference({
+      filename: scene.reference_image,
+      url: scene.reference_url,
+      camera_id: scene.camera_id,
+      width: scene.reference_width,
+      height: scene.reference_height,
+      captured_at: scene.updated_at,
+    });
+  } else {
+    state.roadAbnormalReference = null;
+    elements.roadAbnormalReference.hidden = true;
+    elements.roadAbnormalReference.removeAttribute("src");
+    elements.roadAbnormalFeed.hidden = false;
+    roadAbnormalCanvas.setMedia(elements.roadAbnormalFeed);
+  }
+  renderRoadAbnormalControls();
+}
+
+function syncRoadAbnormalSceneToSource() {
+  const sourceId = elements.roadAbnormalSourceSelect.value;
+  const activeScene = state.roadAbnormalStatus?.active_scene;
+  if (
+    state.roadAbnormalStatus?.running
+    && activeScene
+    && sourceId !== activeScene.camera_id
+  ) {
+    elements.roadAbnormalSourceSelect.value = activeScene.camera_id;
+    showToast("请先停止当前道路异常检测，再切换摄像头", "error");
+    renderRoadAbnormalControls();
+    return;
+  }
+  const selectedScene = currentRoadAbnormalScene();
+  if (selectedScene?.camera_id === sourceId) {
+    renderRoadAbnormalControls();
+    return;
+  }
+  const matchingScene = state.roadAbnormalCatalog.find(
+    (scene) => scene.camera_id === sourceId,
+  );
+  selectRoadAbnormalScene(matchingScene?.scene_id || "");
+}
+
+function renderRoadAbnormalControls() {
+  const scene = currentRoadAbnormalScene();
+  const status = state.roadAbnormalStatus || { running: false, metrics: {} };
+  const selectedSource = elements.roadAbnormalSourceSelect.value;
+  const activeSource = state.stream?.active_source;
+  const sourceReady = Boolean(activeSource && activeSource.id === selectedSource);
+  const referenceReady = Boolean(
+    state.roadAbnormalReference?.filename
+    && state.roadAbnormalReference.camera_id === selectedSource,
+  );
+  const zoneReady = state.roadAbnormalPoints.length >= 3;
+  const monitoring = Boolean(status.running);
+  const busy = state.roadAbnormalBusy;
+
+  elements.roadAbnormalConnectButton.disabled = busy || !selectedSource;
+  elements.roadAbnormalUploadButton.disabled = busy || !selectedSource;
+  elements.roadAbnormalDrawButton.disabled = (
+    busy
+    || monitoring
+    || !sourceReady
+    || !state.stream?.resolution
+    || state.roadAbnormalDrawing
+  );
+  elements.roadAbnormalFinishDrawButton.disabled = busy || !state.roadAbnormalDrawing || state.roadAbnormalPoints.length < 3;
+  elements.roadAbnormalUndoButton.disabled = busy || !state.roadAbnormalDrawing || !state.roadAbnormalPoints.length;
+  elements.roadAbnormalClearZoneButton.disabled = busy || monitoring || !state.roadAbnormalPoints.length;
+  elements.roadAbnormalSaveButton.disabled = busy || monitoring || !sourceReady || !zoneReady;
+  elements.roadAbnormalDeleteSceneButton.disabled = busy || monitoring || !scene;
+  elements.roadAbnormalStartButton.disabled = busy || monitoring || !scene || !sourceReady;
+  elements.roadAbnormalStopButton.disabled = busy || !monitoring;
+
+  if (activeSource) {
+    elements.roadAbnormalSourceName.textContent = activeSource.display_name || activeSource.name;
+    elements.roadAbnormalSourceBadge.textContent = state.stream.paused
+      ? "已暂停"
+      : state.stream.connected ? "实时" : "连接中";
+    elements.roadAbnormalSourceBadge.className = `live-badge ${state.stream.paused ? "paused" : state.stream.connected ? "live" : ""}`;
+  } else {
+    elements.roadAbnormalSourceName.textContent = "未选择视频源";
+    elements.roadAbnormalSourceBadge.textContent = "待机";
+    elements.roadAbnormalSourceBadge.className = "live-badge";
+  }
+  elements.roadAbnormalReferenceStatus.textContent = referenceReady
+    ? `${state.roadAbnormalReference.width} x ${state.roadAbnormalReference.height}`
+    : sourceReady ? "绘制时自动冻结" : "等待视频源";
+  elements.roadAbnormalSummary.textContent = monitoring && status.active_scene
+    ? `${status.active_scene.name} · ${status.active_scene.camera_id}`
+    : `${state.roadAbnormalCatalog.length} 个已保存场景`;
+  elements.roadAbnormalStatusLabel.textContent = monitoring
+    ? status.last_error
+      ? "检测异常"
+      : status.warming_up
+        ? `背景预热 ${Math.round(Number(status.warmup_progress || 0) * 100)}%`
+        : status.metrics?.active_alarms ? "检测到道路异常" : "检测运行中"
+    : "未启动";
+  elements.roadAbnormalStatusDot.className = `status-dot ${
+    monitoring ? (status.last_error || status.metrics?.active_alarms ? "alarm" : "running") : ""
+  }`;
+
+  const readiness = [sourceReady, referenceReady, zoneReady, monitoring];
+  let currentAssigned = false;
+  $$('[data-road-abnormal-step]').forEach((step, index) => {
+    step.classList.toggle("ready", readiness[index]);
+    const current = !readiness[index] && !currentAssigned;
+    step.classList.toggle("current", current);
+    if (current) currentAssigned = true;
+  });
+  roadAbnormalCanvas.setActivity({
+    running: monitoring,
+    alarm: Boolean(status.metrics?.active_alarms),
+  });
+}
+
+function renderRoadAbnormalStatus(status) {
+  state.roadAbnormalStatus = status;
+  const metrics = status?.metrics || {};
+  elements.roadAbnormalZoneCount.textContent = metrics.zones || 0;
+  elements.roadAbnormalCandidateCount.textContent = metrics.active_candidates || 0;
+  elements.roadAbnormalAlarmCount.textContent = metrics.active_alarms || 0;
+  elements.roadAbnormalEventCount.textContent = metrics.total_events || 0;
+  elements.roadAbnormalActiveCount.textContent = status?.candidates?.length || 0;
+
+  elements.roadAbnormalCandidateBody.replaceChildren();
+  for (const candidate of status?.candidates || []) {
+    const row = document.createElement("tr");
+    row.append(
+      cell(candidate.class_name_cn || "未知障碍物"),
+      cell(candidate.lane_name),
+      cell(`${formatParkingDuration(candidate.duration_seconds)} / ${Number(candidate.threshold_seconds).toFixed(1)}秒`),
+    );
+    const statusCell = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = `parking-state ${candidate.status === "alarmed" ? "alarm" : ""}`;
+    badge.textContent = candidate.status === "alarmed" ? "已告警" : "观察中";
+    statusCell.append(badge);
+    row.append(statusCell);
+    elements.roadAbnormalCandidateBody.append(row);
+  }
+  elements.roadAbnormalCandidateEmpty.hidden = Boolean(status?.candidates?.length);
+
+  elements.roadAbnormalEventBody.replaceChildren();
+  for (const event of status?.events || []) {
+    const row = document.createElement("tr");
+    row.append(
+      cell(formatParkingTime(event.triggered_at)),
+      cell(event.class_name_cn || "未知障碍物"),
+      cell(event.lane_name),
+    );
+    const snapshotCell = document.createElement("td");
+    if (event.snapshot_url) {
+      const link = document.createElement("a");
+      link.className = "icon-button small road-abnormal-snapshot";
+      link.href = event.snapshot_url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.title = "查看异常快照";
+      const icon = document.createElement("i");
+      icon.dataset.lucide = "image";
+      link.append(icon);
+      snapshotCell.append(link);
+    } else {
+      snapshotCell.textContent = "--";
+    }
+    row.append(snapshotCell);
+    elements.roadAbnormalEventBody.append(row);
+  }
+  elements.roadAbnormalEventEmpty.hidden = Boolean(status?.events?.length);
+  renderRoadAbnormalControls();
+  refreshIcons();
+}
+
+async function loadRoadAbnormal({ syncEditor = false } = {}) {
+  const payload = await api.roadAbnormal();
+  state.roadAbnormalCatalog = payload.scenes || [];
+  if (
+    !state.roadAbnormalSceneId
+    && payload.status?.active_scene_id
+    && state.roadAbnormalCatalog.some(
+      (scene) => scene.scene_id === payload.status.active_scene_id,
+    )
+  ) {
+    state.roadAbnormalSceneId = payload.status.active_scene_id;
+  }
+  renderRoadAbnormalSceneOptions();
+  if (syncEditor) selectRoadAbnormalScene(state.roadAbnormalSceneId);
+  renderRoadAbnormalStatus(payload.status);
+  if (payload.status?.running) showRoadAbnormalLive();
+}
+
+async function connectRoadAbnormalSource() {
+  const sourceId = elements.roadAbnormalSourceSelect.value;
+  if (!sourceId) return;
+  state.roadAbnormalBusy = true;
+  renderRoadAbnormalControls();
+  try {
+    renderStream(await api.selectStream(sourceId), { syncSettings: true });
+    showRoadAbnormalLive();
+    ensureRoadAbnormalFeed(true);
+  } finally {
+    state.roadAbnormalBusy = false;
+    renderRoadAbnormalControls();
+  }
+}
+
+async function uploadRoadAbnormalVideo(file) {
+  if (!file) return;
+  const cameraId = elements.roadAbnormalSourceSelect.value;
+  if (!cameraId) return;
+  state.roadAbnormalBusy = true;
+  renderRoadAbnormalControls();
+  showToast(`正在上传 ${file.name}`);
+  try {
+    const response = await api.uploadVideo(file, cameraId);
+    renderStream(response.stream, { syncSettings: true });
+    showRoadAbnormalLive();
+    ensureRoadAbnormalFeed(true);
+    showToast("本地视频已载入道路异常工作台", "success");
+  } finally {
+    state.roadAbnormalBusy = false;
+    renderRoadAbnormalControls();
+  }
+}
+
+async function captureRoadAbnormalReference() {
+  const cameraId = elements.roadAbnormalSourceSelect.value;
+  if (!cameraId) return;
+  if (state.stream?.active_source?.id !== cameraId) await connectRoadAbnormalSource();
+  state.roadAbnormalBusy = true;
+  renderRoadAbnormalControls();
+  try {
+    const referenceReady = Boolean(
+      state.roadAbnormalReference?.filename
+      && state.roadAbnormalReference.camera_id === cameraId
+      && !elements.roadAbnormalReference.hidden,
+    );
+    if (!referenceReady) {
+      renderStream(await api.pauseStream(true));
+      const reference = await api.captureRoadAbnormalReference(cameraId);
+      state.roadAbnormalPoints = [];
+      roadAbnormalCanvas.setPoints([]);
+      showRoadAbnormalReference(reference);
+    }
+    activateRoadAbnormalTab("config");
+    roadAbnormalCanvas.startDrawing();
+    showToast("画面已自动冻结，请绘制车道检测区域", "success");
+  } finally {
+    state.roadAbnormalBusy = false;
+    renderRoadAbnormalControls();
+  }
+}
+
+async function saveRoadAbnormalScene(event) {
+  event.preventDefault();
+  if (
+    state.roadAbnormalPoints.length < 3
+    || !elements.roadAbnormalSourceSelect.value
+  ) return;
+  const existing = currentRoadAbnormalScene();
+  const existingZone = existing?.zones?.[0];
+  state.roadAbnormalBusy = true;
+  renderRoadAbnormalControls();
+  try {
+    const scene = await api.saveRoadAbnormalScene({
+      scene_id: existing?.scene_id || "",
+      name: elements.roadAbnormalSceneName.value.trim() || "道路异常监控场景",
+      camera_id: elements.roadAbnormalSourceSelect.value,
+      reference_image: state.roadAbnormalReference?.filename || "",
+      reference_width: state.roadAbnormalReference?.width || 0,
+      reference_height: state.roadAbnormalReference?.height || 0,
+      zones: [{
+        zone_id: existingZone?.zone_id || "",
+        name: elements.roadAbnormalZoneName.value.trim() || "道路检测区域",
+        lane_name: elements.roadAbnormalLaneName.value.trim() || "机动车道",
+        points: state.roadAbnormalPoints,
+        enabled: true,
+      }],
+      persistence_seconds: Number(elements.roadAbnormalPersistence.value),
+      lost_tolerance_seconds: Number(elements.roadAbnormalLost.value),
+      min_area_ratio: Number(elements.roadAbnormalMinArea.value),
+      history: existing?.history || 500,
+      variance_threshold: Number(elements.roadAbnormalVariance.value),
+      detect_shadows: elements.roadAbnormalShadows.checked,
+      warmup_frames: Number(elements.roadAbnormalWarmup.value),
+      learning_rate: existing?.learning_rate ?? 0.002,
+      inference_interval: existing?.inference_interval || 5,
+      yolo_threshold: Number(elements.roadAbnormalYolo.value),
+      anomaly_classes: existing?.anomaly_classes || ["person", "bicycle", "motorcycle"],
+      normal_classes: existing?.normal_classes || ["car", "bus", "truck"],
+    });
+    state.roadAbnormalSceneId = scene.scene_id;
+    await loadRoadAbnormal({ syncEditor: true });
+    showToast("道路异常场景配置已保存", "success");
+  } finally {
+    state.roadAbnormalBusy = false;
+    renderRoadAbnormalControls();
+  }
+}
+
+function newRoadAbnormalScene() {
+  if (state.roadAbnormalDrawing) roadAbnormalCanvas.cancelDrawing();
+  selectRoadAbnormalScene("");
+  elements.roadAbnormalSceneName.focus();
+}
+
+async function deleteRoadAbnormalScene() {
+  const scene = currentRoadAbnormalScene();
+  if (!scene || !window.confirm(`确定删除场景“${scene.name}”？`)) return;
+  await api.deleteRoadAbnormalScene(scene.scene_id);
+  state.roadAbnormalSceneId = "";
+  await loadRoadAbnormal({ syncEditor: true });
+  showToast("道路异常场景已删除", "success");
+}
+
+async function startRoadAbnormal() {
+  const scene = currentRoadAbnormalScene();
+  if (!scene) return;
+  if (state.stream?.active_source?.id !== scene.camera_id) {
+    elements.roadAbnormalSourceSelect.value = scene.camera_id;
+    await connectRoadAbnormalSource();
+  }
+  state.roadAbnormalBusy = true;
+  renderRoadAbnormalControls();
+  try {
+    renderRoadAbnormalStatus(await api.startRoadAbnormal(scene.scene_id));
+    renderStream(await api.streamStatus(), { syncSettings: true });
+    showRoadAbnormalLive();
+    ensureRoadAbnormalFeed(true);
+    activateRoadAbnormalTab("results");
+    showToast("道路异常检测已启动", "success");
+  } finally {
+    state.roadAbnormalBusy = false;
+    renderRoadAbnormalControls();
+  }
+}
+
+async function stopRoadAbnormal() {
+  state.roadAbnormalBusy = true;
+  renderRoadAbnormalControls();
+  try {
+    renderRoadAbnormalStatus(await api.stopRoadAbnormal());
+    if (state.roadAbnormalReference) {
+      showRoadAbnormalReference(state.roadAbnormalReference);
+    }
+    showToast("道路异常检测已停止", "success");
+  } finally {
+    state.roadAbnormalBusy = false;
+    renderRoadAbnormalControls();
+  }
+}
+
+async function clearRoadAbnormalEvents() {
+  if (!window.confirm("确定清空道路异常事件记录？")) return;
+  renderRoadAbnormalStatus(await api.clearRoadAbnormalEvents());
+  showToast("道路异常事件已清空", "success");
+}
+
 async function loadWhitelist() {
   state.whitelist = await api.whitelist();
   renderWhitelist();
@@ -2107,6 +2634,12 @@ function bindEvents() {
   $$('[data-no-parking-tab]').forEach((button) => {
     button.addEventListener("click", () => activateNoParkingTab(button.dataset.noParkingTab));
   });
+  $$('[data-road-abnormal-tab]').forEach((button) => {
+    button.addEventListener(
+      "click",
+      () => activateRoadAbnormalTab(button.dataset.roadAbnormalTab),
+    );
+  });
 
   elements.noParkingSourceSelect.addEventListener("change", syncNoParkingSceneToSource);
   elements.noParkingConnectButton.addEventListener("click", () => connectNoParkingSource().catch(reportError));
@@ -2149,6 +2682,53 @@ function bindEvents() {
   elements.noParkingStartButton.addEventListener("click", () => startNoParking().catch(reportError));
   elements.noParkingStopButton.addEventListener("click", () => stopNoParking().catch(reportError));
   elements.noParkingClearEventsButton.addEventListener("click", () => clearNoParkingEvents().catch(reportError));
+
+  elements.roadAbnormalSourceSelect.addEventListener("change", syncRoadAbnormalSceneToSource);
+  elements.roadAbnormalConnectButton.addEventListener("click", () => connectRoadAbnormalSource().catch(reportError));
+  elements.roadAbnormalUploadButton.addEventListener("click", () => elements.roadAbnormalFileInput.click());
+  elements.roadAbnormalFileInput.addEventListener("change", () => {
+    uploadRoadAbnormalVideo(elements.roadAbnormalFileInput.files[0]).catch(reportError);
+    elements.roadAbnormalFileInput.value = "";
+  });
+  elements.roadAbnormalFeed.addEventListener("load", () => {
+    elements.roadAbnormalEmpty.hidden = true;
+    if (elements.roadAbnormalReference.hidden) {
+      roadAbnormalCanvas.setMedia(elements.roadAbnormalFeed);
+    }
+    roadAbnormalCanvas.draw();
+  });
+  elements.roadAbnormalFeed.addEventListener("error", () => {
+    if (!elements.roadAbnormalReference.hidden) return;
+    elements.roadAbnormalEmpty.hidden = false;
+    window.setTimeout(() => {
+      if (state.activeView === "road-abnormal" && state.stream?.active_source) {
+        ensureRoadAbnormalFeed(true);
+      }
+    }, 1200);
+  });
+  elements.roadAbnormalReference.addEventListener("load", () => {
+    if (!elements.roadAbnormalReference.hidden) {
+      roadAbnormalCanvas.setMedia(elements.roadAbnormalReference);
+    }
+    roadAbnormalCanvas.draw();
+  });
+  elements.roadAbnormalSceneSelect.addEventListener("change", () => {
+    selectRoadAbnormalScene(elements.roadAbnormalSceneSelect.value);
+  });
+  elements.roadAbnormalNewSceneButton.addEventListener("click", newRoadAbnormalScene);
+  elements.roadAbnormalDeleteSceneButton.addEventListener("click", () => deleteRoadAbnormalScene().catch(reportError));
+  elements.roadAbnormalDrawButton.addEventListener("click", () => captureRoadAbnormalReference().catch(reportError));
+  elements.roadAbnormalFinishDrawButton.addEventListener("click", () => {
+    if (!roadAbnormalCanvas.finishDrawing()) {
+      showToast("车道检测区域至少需要三个节点", "error");
+    }
+  });
+  elements.roadAbnormalUndoButton.addEventListener("click", () => roadAbnormalCanvas.undo());
+  elements.roadAbnormalClearZoneButton.addEventListener("click", () => roadAbnormalCanvas.clear());
+  elements.roadAbnormalConfigForm.addEventListener("submit", (event) => saveRoadAbnormalScene(event).catch(reportError));
+  elements.roadAbnormalStartButton.addEventListener("click", () => startRoadAbnormal().catch(reportError));
+  elements.roadAbnormalStopButton.addEventListener("click", () => stopRoadAbnormal().catch(reportError));
+  elements.roadAbnormalClearEventsButton.addEventListener("click", () => clearRoadAbnormalEvents().catch(reportError));
 
   elements.sourceSelect.addEventListener("change", () => playSelectedSource().catch(reportError));
   elements.playButton.addEventListener("click", () => playSelectedSource().catch(reportError));
@@ -2335,6 +2915,18 @@ async function pollNoParking() {
   window.setTimeout(pollNoParking, document.hidden ? 5000 : interval);
 }
 
+async function pollRoadAbnormal() {
+  if (state.activeView === "road-abnormal") {
+    try {
+      renderRoadAbnormalStatus(await api.roadAbnormalStatus());
+    } catch (error) {
+      console.error(error);
+    }
+  }
+  const interval = state.activeView === "road-abnormal" ? 1000 : 4000;
+  window.setTimeout(pollRoadAbnormal, document.hidden ? 5000 : interval);
+}
+
 function startClock() {
   const update = () => {
     elements.clock.textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -2372,7 +2964,8 @@ async function initialize() {
   pollMap();
 }
 
-initialize();
+initialize().then(() => loadRoadAbnormal({ syncEditor: true })).catch(reportError);
 pollMapAnalysis();
 pollNoParking();
 pollNoParkingTopology();
+pollRoadAbnormal();

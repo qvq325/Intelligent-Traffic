@@ -315,7 +315,7 @@ def test_frontend_shell_prevents_stale_asset_initialization_failure(client):
     app_js = client.get("/static/js/app.js").text
 
     assert index.headers["cache-control"] == "no-store"
-    assert "/static/js/app.js?v=20260713-9" in index.text
+    assert "/static/js/app.js?v=20260713-12" in index.text
     assert 'id="road-video-preview"' in index.text
     assert 'id="road-video-preview-status">实时</span>' in index.text
     assert "/api/video/preview?source_id=" in app_js
@@ -332,7 +332,7 @@ def test_map_poll_does_not_replace_an_explicit_new_road_form(client):
     assert "!state.creatingRoad && !state.selectedSegment" in app_js
 
 
-def test_no_parking_scene_workflow_and_runtime_controls(client):
+def test_no_parking_scene_workflow_and_runtime_controls(client, monkeypatch):
     selected = client.post("/api/stream/select", json={"source_id": "道路1"})
     assert selected.status_code == 200
     client.app.state.runtime.video._publish_frame(np.zeros((100, 160, 3), dtype=np.uint8))
@@ -367,11 +367,24 @@ def test_no_parking_scene_workflow_and_runtime_controls(client):
     scene_id = scene.json()["scene_id"]
     assert client.get("/api/no-parking").json()["scenes"][0]["zones"][0]["name"] == "入口禁停区"
 
+    road_stop_calls = []
+    original_road_stop = client.app.state.runtime.road_abnormal.stop
+
+    def stop_road_abnormal():
+        road_stop_calls.append(True)
+        return original_road_stop()
+
+    monkeypatch.setattr(
+        client.app.state.runtime.road_abnormal,
+        "stop",
+        stop_road_abnormal,
+    )
     started = client.post("/api/no-parking/start", json={"scene_id": scene_id})
     assert started.status_code == 200
     assert started.json()["running"] is True
     assert client.app.state.runtime.video.on_detections is None
     assert client.app.state.runtime.video._detection_listeners
+    assert road_stop_calls == [True]
 
     stopped = client.post("/api/no-parking/stop")
     assert stopped.json()["running"] is False
@@ -402,3 +415,109 @@ def test_no_parking_page_is_available_from_the_main_navigation(client):
     assert 'addEventListener("change", syncNoParkingSceneToSource)' in app_js
     assert "class VideoRegionEditor" in canvas_js
     assert "mediaRect()" in canvas_js
+
+
+def test_road_abnormal_scene_workflow_and_runtime_controls(client):
+    selected = client.post("/api/stream/select", json={"source_id": "道路1"})
+    assert selected.status_code == 200
+    client.app.state.runtime.video._publish_frame(
+        np.zeros((100, 160, 3), dtype=np.uint8)
+    )
+
+    scene = client.post(
+        "/api/road-abnormal/scenes",
+        json={
+            "name": "道路1异常场景",
+            "camera_id": "道路1",
+            "zones": [
+                {
+                    "name": "机动车道",
+                    "lane_name": "一号车道",
+                    "points": [[0.1, 0.2], [0.8, 0.2], [0.8, 0.8], [0.1, 0.8]],
+                }
+            ],
+            "persistence_seconds": 2,
+            "min_area_ratio": 0.002,
+            "warmup_frames": 5,
+        },
+    )
+    assert scene.status_code == 201
+    assert scene.json()["reference_width"] == 160
+    assert scene.json()["reference_height"] == 100
+    assert client.get(scene.json()["reference_url"]).status_code == 200
+    scene_id = scene.json()["scene_id"]
+
+    started = client.post("/api/road-abnormal/start", json={"scene_id": scene_id})
+    assert started.status_code == 200
+    assert started.json()["running"] is True
+    assert client.app.state.runtime.video.status()["detection"]["enabled"] is False
+
+    enabled = client.put("/api/detection/settings", json={"enabled": True})
+    assert enabled.status_code == 200
+    assert client.get("/api/road-abnormal/status").json()["running"] is False
+
+    restarted = client.post("/api/road-abnormal/start", json={"scene_id": scene_id})
+    assert restarted.status_code == 200
+    assert restarted.json()["running"] is True
+
+    switched = client.post("/api/stream/select", json={"source_id": "道路2"})
+    assert switched.status_code == 200
+    assert client.get("/api/road-abnormal/status").json()["running"] is False
+
+    client.post("/api/stream/select", json={"source_id": "道路1"})
+    client.post("/api/road-abnormal/start", json={"scene_id": scene_id})
+
+    stopped = client.post("/api/road-abnormal/stop")
+    assert stopped.json()["running"] is False
+    assert client.delete(f"/api/road-abnormal/scenes/{scene_id}").status_code == 200
+
+
+def test_road_abnormal_page_is_available_from_main_navigation(client):
+    index = client.get("/").text
+    api_js = client.get("/static/js/api.js").text
+    app_js = client.get("/static/js/app.js").text
+
+    assert 'data-view="road-abnormal"' in index
+    assert 'id="view-road-abnormal"' in index
+    assert 'id="road-abnormal-canvas"' in index
+    assert 'id="road-abnormal-start-button"' in index
+    assert 'id="road-abnormal-min-area"' in index
+    assert 'id="road-abnormal-reference-button"' not in index
+    assert "绘制时自动冻结" in index
+    assert 'request("/api/road-abnormal/status")' in api_js
+    assert "function captureRoadAbnormalReference()" in app_js
+    assert 'roadAbnormalDrawButton.addEventListener("click", () => captureRoadAbnormalReference()' in app_js
+    assert "function renderRoadAbnormalStatus(status)" in app_js
+    assert "new VideoRegionEditor(" in app_js
+
+
+def test_road_abnormal_auto_reference_requires_matching_video_source(client):
+    response = client.post(
+        "/api/road-abnormal/scenes",
+        json={
+            "name": "未连接场景",
+            "camera_id": "道路1",
+            "zones": [
+                {
+                    "name": "机动车道",
+                    "lane_name": "一号车道",
+                    "points": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "请先连接所选摄像头或关联本地视频"
+
+
+def test_region_editor_uses_context_specific_labels(client):
+    app_js = client.get("/static/js/app.js").text
+    canvas_js = client.get("/static/js/no-parking-canvas.js").text
+
+    assert 'idle: callbacks.labels?.idle || "禁停区域"' in canvas_js
+    assert 'running: callbacks.labels?.running || "监测中"' in canvas_js
+    assert 'alarm: callbacks.labels?.alarm || "违规停留"' in canvas_js
+    assert 'idle: "道路检测区域"' in app_js
+    assert 'running: "异常检测中"' in app_js
+    assert 'alarm: "道路异常"' in app_js

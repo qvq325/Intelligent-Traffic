@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -15,9 +16,71 @@ import numpy as np
 from detection_processor import DetectionProcessor, DetectionResult
 from whitelist_manager import WhitelistManager
 
+from .model_pipelines import ModelPipelineOptions
+
 
 DetectionCallback = Callable[[str, list[DetectionResult], tuple[int, int]], None]
 FrameProcessor = Callable[[str, np.ndarray], np.ndarray]
+ProcessorFactory = Callable[[ModelPipelineOptions], DetectionProcessor]
+
+
+def _default_pipeline_options(scene_key: str) -> ModelPipelineOptions:
+    return ModelPipelineOptions(
+        scene_key=scene_key,
+        preset="legacy",
+        enabled=False,
+        device_preference="cpu",
+        yolo_threshold=0.5,
+        lpr_threshold=0.7,
+        frame_interval=5,
+        inference_size=640,
+        parking_move_threshold=0.03,
+        mog_history=500,
+        mog_variance_threshold=25.0,
+        mog_min_area=150,
+        mog_min_duration=2.0,
+        mog_max_duration=5.0,
+        mog_warmup_frames=50,
+        revision=0,
+        vehicle_model_path=Path(__file__).resolve().parent.parent / "yolo11m.pt",
+        plate_model_path=None,
+        plate_mode="pose",
+        no_parking_mode="dwell",
+        road_abnormal_mode="mog2",
+    )
+
+
+def _default_processor_factory(options: ModelPipelineOptions) -> DetectionProcessor:
+    return DetectionProcessor(
+        yolo_conf=options.yolo_threshold,
+        lpr_conf=options.lpr_threshold,
+        device=options.device_preference,
+        vehicle_model_path=options.vehicle_model_path,
+        plate_model_path=options.plate_model_path,
+        inference_size=options.inference_size,
+        lpr_mode=options.plate_mode,
+    )
+
+
+def _redact_processor_error(
+    error: object,
+    options: ModelPipelineOptions,
+) -> str:
+    message = str(error or "unknown error").strip() or "unknown error"
+    for path in (options.vehicle_model_path, options.plate_model_path):
+        if path is None:
+            continue
+        values: set[str] = set()
+        for candidate in (path, path.absolute(), path.resolve(strict=False)):
+            values.update((str(candidate), candidate.as_posix()))
+        for value in sorted(values, key=len, reverse=True):
+            if not value:
+                continue
+            pattern = r"[\\/]".join(
+                re.escape(component) for component in re.split(r"[\\/]", value)
+            )
+            message = re.sub(pattern, "[model]", message, flags=re.IGNORECASE)
+    return message[:500]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +100,15 @@ class DetectionSettings:
     device: str = "cpu"
 
 
+@dataclass(frozen=True, slots=True)
+class _ProcessingSnapshot:
+    enabled: bool
+    options: ModelPipelineOptions
+    processor: DetectionProcessor | None
+    generation: int
+    epoch: int
+
+
 def serialize_detection(result: DetectionResult) -> dict:
     payload = asdict(result)
     payload["has_plate"] = result.has_plate
@@ -51,10 +123,17 @@ class VideoStreamService:
         whitelist_manager: WhitelistManager,
         on_detections: DetectionCallback | None = None,
         frame_processor: FrameProcessor | None = None,
+        *,
+        scene_key: str = "realtime",
+        processor_factory: ProcessorFactory | None = None,
     ) -> None:
+        if not scene_key:
+            raise ValueError("scene_key must not be empty")
         self.whitelist_manager = whitelist_manager
         self.on_detections = on_detections
         self.frame_processor = frame_processor
+        self.scene_key = scene_key
+        self._processor_factory = processor_factory or _default_processor_factory
         self._detection_listeners: list[DetectionCallback] = []
 
         self._condition = threading.Condition(threading.RLock())
@@ -67,10 +146,16 @@ class VideoStreamService:
         self._connected = False
         self._message = "就绪"
 
-        self._settings = DetectionSettings()
-        self._settings_revision = 0
+        self._desired_processor_options = _default_pipeline_options(scene_key)
+        self._desired_processor_generation = 0
+        self._active_processor_options: ModelPipelineOptions | None = None
+        self._active_processor_generation = -1
+        self._failed_processor_options: ModelPipelineOptions | None = None
+        self._failed_processor_generation: int | None = None
+        self._loading_processor_options: ModelPipelineOptions | None = None
+        self._loading_processor_generation: int | None = None
+        self._inference_epoch = 0
         self._processor: DetectionProcessor | None = None
-        self._processor_device = ""
         self._detection_status = "未启用"
 
         self._latest_jpeg: bytes | None = None
@@ -172,23 +257,85 @@ class VideoStreamService:
         device: str | None = None,
     ) -> None:
         with self._condition:
-            if enabled is not None:
-                self._settings.enabled = bool(enabled)
-            if yolo_threshold is not None:
-                self._settings.yolo_threshold = max(0.05, min(1.0, float(yolo_threshold)))
-            if lpr_threshold is not None:
-                self._settings.lpr_threshold = max(0.05, min(1.0, float(lpr_threshold)))
-            if interval is not None:
-                self._settings.interval = max(1, min(60, int(interval)))
-            if device is not None:
-                self._settings.device = device
-            self._settings_revision += 1
-            if not self._settings.enabled:
+            current = self._desired_processor_options
+            updated = replace(
+                current,
+                enabled=current.enabled if enabled is None else bool(enabled),
+                yolo_threshold=(
+                    current.yolo_threshold
+                    if yolo_threshold is None
+                    else max(0.05, min(1.0, float(yolo_threshold)))
+                ),
+                lpr_threshold=(
+                    current.lpr_threshold
+                    if lpr_threshold is None
+                    else max(0.05, min(1.0, float(lpr_threshold)))
+                ),
+                frame_interval=(
+                    current.frame_interval
+                    if interval is None
+                    else max(1, min(60, int(interval)))
+                ),
+                device_preference=(
+                    current.device_preference if device is None else device
+                ),
+            )
+            if updated == current:
+                return
+
+            retry_failed_options = (
+                self._failed_processor_generation
+                == self._desired_processor_generation
+                and self._failed_processor_options != updated
+            )
+            if (
+                updated.device_preference != current.device_preference
+                or retry_failed_options
+            ):
+                self._desired_processor_generation += 1
+            self._desired_processor_options = updated
+            self._advance_inference_epoch_locked()
+
+            if not updated.enabled:
                 self._detection_status = "未启用"
                 self._results = []
-            elif self._processor is None or self._processor_device != self._settings.device:
+            elif (
+                self._processor is None
+                or self._active_processor_generation
+                != self._desired_processor_generation
+            ):
+                self._detection_status = "等待加载模型"
+            else:
+                lpr_status = "可用" if self._processor.has_lpr else "不可用"
+                self._detection_status = f"模型已就绪 · LPR {lpr_status}"
+            self._condition.notify_all()
+
+    def apply_model_pipeline_options(
+        self,
+        options: ModelPipelineOptions,
+    ) -> bool:
+        """Converge this stream to immutable options for its fixed scene."""
+        if not isinstance(options, ModelPipelineOptions):
+            raise TypeError("options must be ModelPipelineOptions")
+        if options.scene_key != self.scene_key:
+            raise ValueError(
+                f"scene options {options.scene_key!r} do not match "
+                f"service {self.scene_key!r}"
+            )
+
+        with self._condition:
+            if options == self._desired_processor_options:
+                return False
+            self._desired_processor_options = options
+            self._desired_processor_generation += 1
+            self._advance_inference_epoch_locked()
+            if not options.enabled:
+                self._detection_status = "未启用"
+                self._results = []
+            else:
                 self._detection_status = "等待加载模型"
             self._condition.notify_all()
+            return True
 
     def add_detection_listener(self, listener: DetectionCallback) -> None:
         """Register an additional consumer without changing the primary callback."""
@@ -200,13 +347,25 @@ class VideoStreamService:
         with self._condition:
             source = self._requested_source
             results = [dict(result) for result in self._results]
-            settings = asdict(self._settings)
+            desired = self._desired_processor_options
+            active = self._active_processor_options
+            settings = {
+                "enabled": desired.enabled,
+                "yolo_threshold": desired.yolo_threshold,
+                "lpr_threshold": desired.lpr_threshold,
+                "interval": desired.frame_interval,
+                "device": desired.device_preference,
+                "preset": desired.preset,
+                "desired_revision": desired.revision,
+                "active_revision": active.revision if active is not None else None,
+            }
             resolution = (
                 {"width": self._resolution[0], "height": self._resolution[1]}
                 if self._resolution
                 else None
             )
             return {
+                "scene_key": self.scene_key,
                 "running": bool(self._thread and self._thread.is_alive()),
                 "connected": self._connected,
                 "paused": self._paused,
@@ -272,6 +431,7 @@ class VideoStreamService:
         frame_count = 0
         source_fps = 0.0
         last_results: list[DetectionResult] = []
+        last_results_snapshot: _ProcessingSnapshot | None = None
 
         while not self._stop_event.is_set():
             self._ensure_processor()
@@ -290,8 +450,10 @@ class VideoStreamService:
                 frame_count = 0
                 source_fps = 0.0
                 last_results = []
-                if self._processor:
-                    self._processor.reset_tracking()
+                last_results_snapshot = None
+                active_processor = self._processing_snapshot().processor
+                if active_processor:
+                    active_processor.reset_tracking()
                 if active_source is not None:
                     capture = self._open_capture(active_source)
                     if capture is not None and self._is_local_file(active_source.url):
@@ -329,27 +491,58 @@ class VideoStreamService:
 
             frame_count += 1
             annotated = frame
-            settings = self._settings_snapshot()
-            processor = self._processor
+            annotated_snapshot: _ProcessingSnapshot | None = None
+            processing = self._processing_snapshot()
+            options = processing.options
+            processor = processing.processor
             if (
-                settings.enabled
+                processing.enabled
                 and processor is not None
                 and processor.is_initialized
-                and frame_count % settings.interval == 0
+                and frame_count % options.frame_interval == 0
             ):
                 try:
-                    processor.yolo_threshold = settings.yolo_threshold
-                    processor.lpr_threshold = settings.lpr_threshold
-                    annotated, last_results = processor.process(
+                    processor.yolo_threshold = options.yolo_threshold
+                    processor.lpr_threshold = options.lpr_threshold
+                    candidate_frame, candidate_results = processor.process(
                         frame,
                         camera_id=active_source.name if active_source else "",
                     )
-                    self._publish_results(active_source, last_results, frame)
+                    candidate_results = list(candidate_results)
+                    if self._publish_results(
+                        active_source,
+                        candidate_results,
+                        frame,
+                        processing,
+                    ):
+                        annotated = candidate_frame
+                        annotated_snapshot = processing
+                        last_results = candidate_results
+                        last_results_snapshot = processing
+                    else:
+                        annotated = frame
+                        last_results = []
+                        last_results_snapshot = None
                 except Exception as exc:
                     self._set_detection_status(f"检测异常: {exc}")
                     annotated = frame
-            elif settings.enabled and last_results:
-                annotated = self._draw_cached_results(frame, last_results)
+            elif processing.enabled and last_results:
+                if (
+                    last_results_snapshot is not None
+                    and self._same_processing_token(
+                        processing,
+                        last_results_snapshot,
+                    )
+                    and self._processing_snapshot_current(processing)
+                ):
+                    annotated = self._draw_cached_results(frame, last_results)
+                    annotated_snapshot = processing
+                else:
+                    last_results = []
+                    last_results_snapshot = None
+            elif not processing.enabled:
+                last_results = []
+                last_results_snapshot = None
 
             if active_source is not None and self.frame_processor is not None:
                 try:
@@ -357,7 +550,15 @@ class VideoStreamService:
                 except Exception as exc:
                     self._set_detection_status(f"画面分析异常: {exc}")
 
-            self._publish_frame(annotated)
+            if (
+                annotated_snapshot is not None
+                and not self._processing_snapshot_current(annotated_snapshot)
+            ):
+                annotated = frame
+                annotated_snapshot = None
+            if not self._publish_frame(annotated, annotated_snapshot):
+                if annotated_snapshot is not None:
+                    self._publish_frame(frame)
 
             if active_source and self._is_local_file(active_source.url) and source_fps > 0:
                 elapsed = time.monotonic() - frame_started
@@ -368,74 +569,212 @@ class VideoStreamService:
         if capture is not None:
             capture.release()
 
-    def _settings_snapshot(self) -> DetectionSettings:
+    def _advance_inference_epoch_locked(self) -> None:
+        self._inference_epoch += 1
+        self._results = []
+
+    def _processing_snapshot(self) -> _ProcessingSnapshot:
         with self._condition:
-            return DetectionSettings(**asdict(self._settings))
+            desired = self._desired_processor_options
+            processor = self._processor
+            options = desired
+            generation = self._desired_processor_generation
+            if processor is not None and self._active_processor_options is not None:
+                generation = self._active_processor_generation
+                if generation != self._desired_processor_generation:
+                    options = self._active_processor_options
+            return _ProcessingSnapshot(
+                enabled=desired.enabled,
+                options=options,
+                processor=processor,
+                generation=generation,
+                epoch=self._inference_epoch,
+            )
+
+    def _processing_snapshot_current(self, snapshot: _ProcessingSnapshot) -> bool:
+        with self._condition:
+            return (
+                self._desired_processor_options.enabled
+                and self._inference_epoch == snapshot.epoch
+                and self._processor is snapshot.processor
+                and self._active_processor_generation == snapshot.generation
+            )
+
+    @staticmethod
+    def _same_processing_token(
+        first: _ProcessingSnapshot,
+        second: _ProcessingSnapshot,
+    ) -> bool:
+        return (
+            first.epoch == second.epoch
+            and first.generation == second.generation
+            and first.processor is second.processor
+        )
+
+    def _settings_snapshot(self) -> DetectionSettings:
+        snapshot = self._processing_snapshot()
+        options = snapshot.options
+        return DetectionSettings(
+            enabled=snapshot.enabled,
+            yolo_threshold=options.yolo_threshold,
+            lpr_threshold=options.lpr_threshold,
+            interval=options.frame_interval,
+            device=options.device_preference,
+        )
 
     def _ensure_processor(self) -> None:
-        settings = self._settings_snapshot()
-        if not settings.enabled:
-            return
-        if self._processor and self._processor_device == settings.device:
-            return
-
         with self._condition:
-            revision = self._settings_revision
-            self._detection_status = f"正在加载模型 (device={settings.device})"
-
-        processor = DetectionProcessor(
-            yolo_conf=settings.yolo_threshold,
-            lpr_conf=settings.lpr_threshold,
-            device=settings.device,
-        )
-        processor.whitelist_manager = self.whitelist_manager
-        success = processor.initialize()
-
-        with self._condition:
-            current_device = self._settings.device
-            if revision != self._settings_revision and current_device != settings.device:
+            options = self._desired_processor_options
+            generation = self._desired_processor_generation
+            if not options.enabled:
                 return
-            if success:
+            if (
+                self._processor is not None
+                and self._processor.is_initialized
+                and self._active_processor_generation == generation
+            ):
+                return
+            if (
+                self._failed_processor_generation == generation
+                and self._failed_processor_options == options
+            ):
+                return
+            if self._loading_processor_generation is not None:
+                return
+            self._loading_processor_generation = generation
+            self._loading_processor_options = options
+            self._detection_status = (
+                f"正在加载模型 (device={options.device_preference})"
+            )
+
+        processor: DetectionProcessor | None = None
+        initialized = False
+        candidate_has_lpr = False
+        load_error: object = "unknown error"
+        try:
+            processor = self._processor_factory(options)
+            processor.whitelist_manager = self.whitelist_manager
+            initialize = getattr(processor, "initialize", None)
+            if not callable(initialize):
+                raise TypeError("processor protocol invalid: missing initialize")
+            initialized = bool(initialize())
+            if initialized:
+                missing = [
+                    name
+                    for name in ("process", "reset_tracking")
+                    if not callable(getattr(processor, name, None))
+                ]
+                for name in (
+                    "is_initialized",
+                    "has_lpr",
+                    "yolo_threshold",
+                    "lpr_threshold",
+                ):
+                    if not hasattr(processor, name):
+                        missing.append(name)
+                if missing:
+                    raise TypeError(
+                        "processor protocol invalid: missing "
+                        + ", ".join(sorted(missing))
+                    )
+                if not bool(processor.is_initialized):
+                    raise TypeError(
+                        "processor protocol invalid: is_initialized is false"
+                    )
+                processor.yolo_threshold = options.yolo_threshold
+                processor.lpr_threshold = options.lpr_threshold
+                candidate_has_lpr = bool(processor.has_lpr)
+            else:
+                load_error = getattr(processor, "init_error", load_error)
+        except Exception as exc:
+            initialized = False
+            load_error = exc
+
+        with self._condition:
+            if (
+                self._loading_processor_generation == generation
+                and self._loading_processor_options == options
+            ):
+                self._loading_processor_generation = None
+                self._loading_processor_options = None
+            if (
+                generation != self._desired_processor_generation
+                or options != self._desired_processor_options
+            ):
+                self._condition.notify_all()
+                return
+            if initialized and processor is not None:
+                self._advance_inference_epoch_locked()
                 self._processor = processor
-                self._processor_device = settings.device
-                lpr_status = "可用" if processor.has_lpr else "不可用"
+                self._active_processor_generation = generation
+                self._active_processor_options = options
+                self._failed_processor_generation = None
+                self._failed_processor_options = None
+                lpr_status = "可用" if candidate_has_lpr else "不可用"
                 self._detection_status = f"模型已就绪 · LPR {lpr_status}"
             else:
-                self._settings.enabled = False
-                self._detection_status = f"模型加载失败: {processor.init_error}"
+                self._failed_processor_generation = generation
+                self._failed_processor_options = options
+                self._detection_status = (
+                    f"模型加载失败: {_redact_processor_error(load_error, options)}"
+                )
+            self._condition.notify_all()
 
     def _publish_results(
         self,
         source: StreamSource | None,
         results: Iterable[DetectionResult],
         frame: np.ndarray,
-    ) -> None:
+        snapshot: _ProcessingSnapshot,
+    ) -> bool:
         result_list = list(results)
         with self._condition:
+            if not (
+                self._desired_processor_options.enabled
+                and self._inference_epoch == snapshot.epoch
+                and self._processor is snapshot.processor
+                and self._active_processor_generation == snapshot.generation
+            ):
+                return False
             self._results = [serialize_detection(result) for result in result_list]
             listeners = list(self._detection_listeners)
             primary_callback = self.on_detections
         if source is None:
-            return
+            return True
         height, width = frame.shape[:2]
         callbacks = ([primary_callback] if primary_callback else []) + listeners
         for callback in callbacks:
+            if not self._processing_snapshot_current(snapshot):
+                return False
             try:
                 callback(source.name, result_list, (width, height))
             except Exception as exc:
                 self._set_detection_status(f"检测结果处理异常: {exc}")
+        return self._processing_snapshot_current(snapshot)
 
-    def _publish_frame(self, frame: np.ndarray) -> None:
+    def _publish_frame(
+        self,
+        frame: np.ndarray,
+        snapshot: _ProcessingSnapshot | None = None,
+    ) -> bool:
         ok, encoded = cv2.imencode(
             ".jpg",
             frame,
             [int(cv2.IMWRITE_JPEG_QUALITY), 86],
         )
         if not ok:
-            return
+            return False
+        jpeg = encoded.tobytes()
         now = time.monotonic()
         height, width = frame.shape[:2]
         with self._condition:
+            if snapshot is not None and not (
+                self._desired_processor_options.enabled
+                and self._inference_epoch == snapshot.epoch
+                and self._processor is snapshot.processor
+                and self._active_processor_generation == snapshot.generation
+            ):
+                return False
             if self._last_publish_time:
                 instant_fps = 1.0 / max(0.001, now - self._last_publish_time)
                 self._display_fps = (
@@ -444,10 +783,11 @@ class VideoStreamService:
                     else self._display_fps * 0.82 + instant_fps * 0.18
                 )
             self._last_publish_time = now
-            self._latest_jpeg = encoded.tobytes()
+            self._latest_jpeg = jpeg
             self._resolution = (width, height)
             self._frame_sequence += 1
             self._condition.notify_all()
+            return True
 
     def _open_capture(self, source: StreamSource) -> cv2.VideoCapture | None:
         params = [

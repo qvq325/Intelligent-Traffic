@@ -60,12 +60,53 @@ function Stop-PortListeners {
     }
 }
 
-if (-not $PSBoundParameters.ContainsKey("ListenHost") -and $env:VIDEOTEST_HOST) {
-    $ListenHost = $env:VIDEOTEST_HOST
+$uv = Get-Command uv -ErrorAction SilentlyContinue
+if (-not $uv) {
+    throw "uv was not found. Install it from https://docs.astral.sh/uv/ and run this script again."
 }
-if (-not $PSBoundParameters.ContainsKey("Port") -and $env:VIDEOTEST_PORT) {
+
+Set-Location -LiteralPath $ProjectRoot
+
+if (-not $SkipSync) {
+    Write-Host "Checking Python 3.11 environment and dependencies..."
+    & $uv.Source sync --frozen
+    if ($LASTEXITCODE -ne 0) {
+        throw "uv sync failed with exit code $LASTEXITCODE."
+    }
+}
+
+$serverConfigScript = @'
+import json
+import os
+from pathlib import Path
+
+from dotenv import dotenv_values
+
+dotenv = dotenv_values(Path.cwd() / ".env")
+print(json.dumps({
+    "host": dotenv.get("VIDEOTEST_HOST") or os.getenv("VIDEOTEST_HOST") or "127.0.0.1",
+    "port": dotenv.get("VIDEOTEST_PORT") or os.getenv("VIDEOTEST_PORT") or "8000",
+}))
+'@
+$serverConfigJson = & $uv.Source run --no-sync python -c $serverConfigScript
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to load server configuration from .env."
+}
+
+try {
+    $serverConfig = $serverConfigJson | ConvertFrom-Json -ErrorAction Stop
+}
+catch {
+    throw "Failed to parse server configuration: $($_.Exception.Message)"
+}
+
+if (-not $PSBoundParameters.ContainsKey("ListenHost")) {
+    $ListenHost = [string]$serverConfig.host
+}
+if (-not $PSBoundParameters.ContainsKey("Port")) {
     $parsedPort = 0
-    if (-not [int]::TryParse($env:VIDEOTEST_PORT, [ref]$parsedPort)) {
+    $configuredPort = [string]$serverConfig.port
+    if (-not [int]::TryParse($configuredPort, [ref]$parsedPort)) {
         throw "VIDEOTEST_PORT must be an integer."
     }
     if ($parsedPort -lt 1 -or $parsedPort -gt 65535) {
@@ -76,12 +117,6 @@ if (-not $PSBoundParameters.ContainsKey("Port") -and $env:VIDEOTEST_PORT) {
 
 $browserHost = if ($ListenHost -in @("0.0.0.0", "::")) { "127.0.0.1" } else { $ListenHost }
 $baseUrl = "http://${browserHost}:$Port"
-$uv = Get-Command uv -ErrorAction SilentlyContinue
-if (-not $uv) {
-    throw "uv was not found. Install it from https://docs.astral.sh/uv/ and run this script again."
-}
-
-Set-Location -LiteralPath $ProjectRoot
 
 $listeners = @(Get-PortListeners -LocalPort $Port)
 if ($listeners.Count -gt 0) {
@@ -93,32 +128,32 @@ if ($listeners.Count -gt 0) {
     Stop-PortListeners -Listeners $listeners -LocalPort $Port
 }
 
-if (-not $SkipSync) {
-    Write-Host "Checking Python 3.11 environment and dependencies..."
-    & $uv.Source sync --frozen
-    if ($LASTEXITCODE -ne 0) {
-        throw "uv sync failed with exit code $LASTEXITCODE."
-    }
-}
-
 $logDirectory = Join-Path $ProjectRoot "runtime\logs"
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $stdoutLog = Join-Path $logDirectory "server-$timestamp.out.log"
 $stderrLog = Join-Path $logDirectory "server-$timestamp.err.log"
 
-$env:VIDEOTEST_HOST = $ListenHost
-$env:VIDEOTEST_PORT = [string]$Port
-
 Write-Host "Starting VideoTest at $baseUrl..."
-$launcher = Start-Process `
-    -FilePath $uv.Source `
-    -ArgumentList @("run", "python", "main.py") `
-    -WorkingDirectory $ProjectRoot `
-    -RedirectStandardOutput $stdoutLog `
-    -RedirectStandardError $stderrLog `
-    -WindowStyle Hidden `
-    -PassThru
+$processEnvironment = [EnvironmentVariableTarget]::Process
+$originalHost = [Environment]::GetEnvironmentVariable("VIDEOTEST_HOST", $processEnvironment)
+$originalPort = [Environment]::GetEnvironmentVariable("VIDEOTEST_PORT", $processEnvironment)
+try {
+    [Environment]::SetEnvironmentVariable("VIDEOTEST_HOST", $ListenHost, $processEnvironment)
+    [Environment]::SetEnvironmentVariable("VIDEOTEST_PORT", [string]$Port, $processEnvironment)
+    $launcher = Start-Process `
+        -FilePath $uv.Source `
+        -ArgumentList @("run", "python", "main.py") `
+        -WorkingDirectory $ProjectRoot `
+        -RedirectStandardOutput $stdoutLog `
+        -RedirectStandardError $stderrLog `
+        -WindowStyle Hidden `
+        -PassThru
+}
+finally {
+    [Environment]::SetEnvironmentVariable("VIDEOTEST_HOST", $originalHost, $processEnvironment)
+    [Environment]::SetEnvironmentVariable("VIDEOTEST_PORT", $originalPort, $processEnvironment)
+}
 
 $ready = $false
 $deadline = [DateTime]::UtcNow.AddSeconds(60)

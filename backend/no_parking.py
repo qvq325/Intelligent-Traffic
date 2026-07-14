@@ -7,14 +7,18 @@ import math
 import re
 import threading
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
 from uuid import uuid4
 
+from .model_pipelines import ModelPipelineOptions
+
 
 Point = tuple[float, float]
 DEFAULT_VEHICLE_CLASSES = ["car", "motorcycle", "bus", "truck"]
+PARKING_ANCHOR_HISTORY_LIMIT = 30
 
 
 @dataclass(slots=True)
@@ -52,10 +56,14 @@ class ParkingTrackState:
     plate_text: str
     bbox: tuple[float, float, float, float]
     anchor: Point
+    stationary_anchor: Point
     entered_at: float
     last_seen: float
     dwell_seconds: float = 0.0
     event_id: str = ""
+    anchor_history: deque[Point] = field(
+        default_factory=lambda: deque(maxlen=PARKING_ANCHOR_HISTORY_LIMIT)
+    )
 
 
 def _identifier(value: str, prefix: str) -> str:
@@ -102,7 +110,31 @@ class NoParkingMonitor:
         self._active_scene_id = ""
         self._running = False
         self._last_camera_id = ""
+        self._pipeline_options: ModelPipelineOptions | None = None
+        self._no_parking_mode = "dwell"
+        self._parking_move_threshold = 0.03
         self._load()
+
+    def apply_model_pipeline_options(self, options: ModelPipelineOptions) -> bool:
+        if not isinstance(options, ModelPipelineOptions):
+            raise TypeError("options must be ModelPipelineOptions")
+        if options.scene_key != "no_parking":
+            raise ValueError("model pipeline scene must be no_parking")
+        if options.no_parking_mode not in {"dwell", "stationary"}:
+            raise ValueError("unsupported no-parking pipeline mode")
+        with self._lock:
+            if options == self._pipeline_options:
+                return False
+            changed = self._close_all_tracks(time.time())
+            self._tracks.clear()
+            self._pipeline_options = options
+            self._no_parking_mode = options.no_parking_mode
+            self._parking_move_threshold = max(
+                0.0, float(options.parking_move_threshold)
+            )
+            if changed:
+                self._save_events()
+            return True
 
     def _load(self) -> None:
         with self._lock:
@@ -437,9 +469,11 @@ class NoParkingMonitor:
                         plate_text=details["plate_text"],
                         bbox=details["bbox"],
                         anchor=details["anchor"],
+                        stationary_anchor=details["anchor"],
                         entered_at=observed_at,
                         last_seen=observed_at,
                     )
+                    state.anchor_history.append(details["anchor"])
                     self._tracks[key] = state
                 else:
                     gap = max(0.0, observed_at - state.last_seen)
@@ -448,8 +482,41 @@ class NoParkingMonitor:
                         state.entered_at = observed_at
                         state.dwell_seconds = 0.0
                         state.event_id = ""
+                        state.stationary_anchor = details["anchor"]
+                        state.anchor_history.clear()
+                        state.anchor_history.append(details["anchor"])
                     else:
-                        state.dwell_seconds += gap
+                        moved = False
+                        if self._no_parking_mode == "stationary":
+                            anchors = (*state.anchor_history, details["anchor"])
+                            baseline_displacement = math.dist(
+                                state.stationary_anchor,
+                                details["anchor"],
+                            )
+                            window_displacement = max(
+                                (
+                                    math.dist(start, end)
+                                    for index, start in enumerate(anchors)
+                                    for end in anchors[index + 1:]
+                                ),
+                                default=0.0,
+                            )
+                            moved = (
+                                max(baseline_displacement, window_displacement)
+                                > self._parking_move_threshold
+                            )
+                        if moved:
+                            events_changed = (
+                                self._close_event(state, observed_at) or events_changed
+                            )
+                            state.entered_at = observed_at
+                            state.dwell_seconds = 0.0
+                            state.event_id = ""
+                            state.stationary_anchor = details["anchor"]
+                            state.anchor_history.clear()
+                        else:
+                            state.dwell_seconds += gap
+                        state.anchor_history.append(details["anchor"])
                     state.last_seen = observed_at
                     state.vehicle_class = details["vehicle_class"]
                     state.plate_text = details["plate_text"] or state.plate_text
@@ -515,7 +582,11 @@ class NoParkingMonitor:
                 self._save_events()
             tracks = [
                 {
-                    **asdict(track),
+                    **{
+                        key: value
+                        for key, value in asdict(track).items()
+                        if key not in {"anchor_history", "stationary_anchor"}
+                    },
                     "status": "alarmed" if track.event_id else "pending",
                     "threshold_seconds": next(
                         (

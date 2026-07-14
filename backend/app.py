@@ -10,12 +10,15 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, Query, Response, UploadFile, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from .config import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AppConfig, default_config
+from .configuration.errors import ConfigurationError
+from .configuration.router import create_configuration_router
 from .preview_stream import MultiCameraPreviewService
 from .schemas import (
     CameraUpdate,
@@ -85,10 +88,12 @@ def create_app(
 ) -> FastAPI:
     config = config or default_config()
     runtime = ApplicationState(config)
-    preview_stream = MultiCameraPreviewService(config.stream_sources)
+    preview_stream = MultiCameraPreviewService(runtime.current_stream_mapping())
+    runtime.attach_preview_service(preview_stream)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        runtime.bootstrap_configuration()
         if start_video:
             runtime.start()
             preview_stream.prewarm()
@@ -105,17 +110,49 @@ def create_app(
     app.state.runtime = runtime
     app.state.preview_stream = preview_stream
 
+    @app.exception_handler(ConfigurationError)
+    async def configuration_error_handler(_, exc: ConfigurationError) -> JSONResponse:
+        return JSONResponse(status_code=exc.status_code, content=exc.payload())
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_error_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        if not request.url.path.startswith("/api/config"):
+            return JSONResponse(status_code=422, content={"detail": exc.errors()})
+        details = [
+            {
+                "field": ".".join(str(item) for item in error["loc"] if item != "body"),
+                "message": error["msg"],
+                "type": error["type"],
+            }
+            for error in exc.errors()
+        ]
+        return JSONResponse(
+            status_code=422,
+            content=ConfigurationError(
+                "CONFIG_VALIDATION_ERROR",
+                "配置请求字段校验失败",
+                details=details,
+            ).payload(),
+        )
+
     @app.get("/api/health")
     def health() -> dict:
         return {"status": "ok", "service": "video-test", "version": app.version}
 
     @app.get("/api/system")
     def system_info() -> dict:
-        return {
+        payload = {
             "name": "沙盘交通智控台",
             "sources": runtime.source_catalog(),
             "devices": runtime.devices,
         }
+        if runtime.configuration_enabled and runtime._configuration_bootstrapped:
+            payload["configuration"] = runtime.configuration_service.summary()
+        else:
+            payload["configuration"] = {"enabled": runtime.configuration_enabled}
+        return payload
 
     @app.get("/api/stream/status")
     def stream_status() -> dict:
@@ -123,11 +160,10 @@ def create_app(
 
     @app.post("/api/stream/select")
     def select_stream(payload: SourceSelection) -> dict:
-        url = config.stream_sources.get(payload.source_id)
+        url = runtime.stream_url(payload.source_id)
         if url is None:
             raise HTTPException(status_code=404, detail="视频源不存在")
         preview_stream.cancel_prewarm()
-        runtime.road_abnormal.stop()
         runtime.video.select_source(payload.source_id, payload.source_id, url)
         return runtime.video.status()
 
@@ -136,7 +172,7 @@ def create_app(
         file: UploadFile = File(...),
         camera_id: str | None = Query(default=None, max_length=100),
     ) -> dict:
-        if camera_id is not None and camera_id not in config.stream_sources:
+        if camera_id is not None and runtime.stream_url(camera_id) is None:
             raise HTTPException(status_code=404, detail="关联摄像头不存在")
         path = await _store_upload(
             file,
@@ -144,9 +180,8 @@ def create_app(
             VIDEO_EXTENSIONS,
             max_bytes=4 * 1024 * 1024 * 1024,
         )
-        source_id = camera_id or next(iter(config.stream_sources), "本地视频")
+        source_id = camera_id or next(iter(runtime.current_stream_mapping()), "本地视频")
         preview_stream.cancel_prewarm()
-        runtime.road_abnormal.stop()
         runtime.video.select_source(
             source_id,
             source_id,
@@ -173,9 +208,13 @@ def create_app(
         }:
             raise HTTPException(status_code=422, detail="推理设备不可用")
         if payload.enabled:
-            runtime.road_abnormal.stop()
             runtime.map_analysis.update_detection_settings(enabled=False)
         runtime.video.update_detection_settings(**values)
+        if runtime.configuration_enabled:
+            persisted = dict(values)
+            if "device" in persisted:
+                persisted["device_preference"] = persisted.pop("device")
+            runtime.configuration_service.update_detection_settings(persisted)
         return runtime.video.status()["detection"]
 
     def map_analysis_status() -> dict:
@@ -201,7 +240,7 @@ def create_app(
 
     @app.post("/api/map/analysis/select")
     def select_map_analysis(payload: SourceSelection) -> dict:
-        url = config.stream_sources.get(payload.source_id)
+        url = runtime.stream_url(payload.source_id)
         if url is None:
             raise HTTPException(status_code=404, detail="摄像头不存在")
         with runtime.map_lock:
@@ -347,40 +386,29 @@ def create_app(
 
     @app.post("/api/no-parking/scenes", status_code=status.HTTP_201_CREATED)
     def upsert_no_parking_scene(payload: NoParkingScenePayload) -> dict:
-        if payload.camera_id not in config.stream_sources:
+        if runtime.stream_url(payload.camera_id) is None:
             raise HTTPException(status_code=404, detail="关联摄像头不存在")
         try:
-            return runtime.no_parking.upsert_scene(payload.model_dump())
+            scene = runtime.no_parking.upsert_scene(payload.model_dump())
+            runtime.persist_scene("no_parking", scene)
+            return scene
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.delete("/api/no-parking/scenes/{scene_id}")
     def delete_no_parking_scene(scene_id: str) -> dict:
+        runtime.delete_scene_archive(scene_id)
         if not runtime.no_parking.delete_scene(scene_id):
             raise HTTPException(status_code=404, detail="禁停场景不存在")
         return {"deleted": True, "scene_id": scene_id}
 
     @app.post("/api/no-parking/start")
     def start_no_parking(payload: NoParkingStartRequest) -> dict:
-        scene = runtime.no_parking.get_scene(payload.scene_id)
-        if scene is None:
-            raise HTTPException(status_code=404, detail="禁停场景不存在")
-        stream = runtime.video.status()
-        source = stream.get("active_source")
-        if source is None or source["id"] != scene["camera_id"]:
-            raise HTTPException(status_code=409, detail="当前视频源与禁停场景不匹配")
-        runtime.road_abnormal.stop()
-        runtime.map_analysis.update_detection_settings(enabled=False)
-        if source["local"] and not stream["connected"]:
-            runtime.video.restart_source()
-        else:
-            runtime.video.set_paused(False)
-        runtime.video.update_detection_settings(enabled=True)
-        return runtime.no_parking.start(payload.scene_id)
+        return runtime.start_legacy_scene("no_parking", payload.scene_id)
 
     @app.post("/api/no-parking/stop")
     def stop_no_parking() -> dict:
-        return runtime.no_parking.stop()
+        return runtime.stop_legacy_scene("no_parking")
 
     @app.delete("/api/no-parking/events")
     def clear_no_parking_events() -> dict:
@@ -432,7 +460,7 @@ def create_app(
 
     @app.post("/api/road-abnormal/scenes", status_code=status.HTTP_201_CREATED)
     def upsert_road_abnormal_scene(payload: RoadAbnormalScenePayload) -> dict:
-        if payload.camera_id not in config.stream_sources:
+        if runtime.stream_url(payload.camera_id) is None:
             raise HTTPException(status_code=404, detail="关联摄像头不存在")
         values = payload.model_dump()
         if not values["reference_image"]:
@@ -459,37 +487,26 @@ def create_app(
                 reference_height=reference["height"],
             )
         try:
-            return runtime.road_abnormal.upsert_scene(values)
+            scene = runtime.road_abnormal.upsert_scene(values)
+            runtime.persist_scene("road_abnormal", scene)
+            return scene
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.delete("/api/road-abnormal/scenes/{scene_id}")
     def delete_road_abnormal_scene(scene_id: str) -> dict:
+        runtime.delete_scene_archive(scene_id)
         if not runtime.road_abnormal.delete_scene(scene_id):
             raise HTTPException(status_code=404, detail="道路异常场景不存在")
         return {"deleted": True, "scene_id": scene_id}
 
     @app.post("/api/road-abnormal/start")
     def start_road_abnormal(payload: RoadAbnormalStartRequest) -> dict:
-        scene = runtime.road_abnormal.get_scene(payload.scene_id)
-        if scene is None:
-            raise HTTPException(status_code=404, detail="道路异常场景不存在")
-        stream = runtime.video.status()
-        source = stream.get("active_source")
-        if source is None or source["id"] != scene["camera_id"]:
-            raise HTTPException(status_code=409, detail="当前视频源与道路异常场景不匹配")
-        runtime.no_parking.stop()
-        runtime.map_analysis.update_detection_settings(enabled=False)
-        runtime.video.update_detection_settings(enabled=False)
-        if source["local"] and not stream["connected"]:
-            runtime.video.restart_source()
-        else:
-            runtime.video.set_paused(False)
-        return runtime.road_abnormal.start(payload.scene_id)
+        return runtime.start_legacy_scene("road_abnormal", payload.scene_id)
 
     @app.post("/api/road-abnormal/stop")
     def stop_road_abnormal() -> dict:
-        return runtime.road_abnormal.stop()
+        return runtime.stop_legacy_scene("road_abnormal")
 
     @app.delete("/api/road-abnormal/events")
     def clear_road_abnormal_events() -> dict:
@@ -527,6 +544,7 @@ def create_app(
     @app.patch("/api/whitelist/enabled")
     def set_whitelist_enabled(payload: WhitelistEnabledUpdate) -> dict:
         runtime.whitelist.enabled = payload.enabled
+        runtime.save_whitelist()
         return {"enabled": runtime.whitelist.enabled}
 
     @app.get("/api/map")
@@ -553,6 +571,7 @@ def create_app(
 
     @app.put("/api/map/cameras/{camera_id}")
     def update_camera(camera_id: str, payload: CameraUpdate) -> dict:
+        runtime.ensure_active_topology_editable()
         with runtime.map_lock:
             if camera_id not in runtime.traffic_map.cameras:
                 raise HTTPException(status_code=404, detail="摄像头不存在")
@@ -560,9 +579,12 @@ def create_app(
                 raise HTTPException(status_code=422, detail="关联道路不存在")
             camera = runtime.traffic_map.set_camera(camera_id=camera_id, **payload.model_dump())
             runtime.traffic_map.save()
-            return asdict(camera)
+            result = asdict(camera)
+        runtime.persist_active_topology()
+        return result
 
     def save_segment(payload: SegmentPayload, segment_id: str = "") -> dict:
+        runtime.ensure_active_topology_editable()
         with runtime.map_lock:
             values = payload.model_dump()
             values["segment_id"] = segment_id or values["segment_id"]
@@ -571,7 +593,9 @@ def create_app(
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
             runtime.traffic_map.save()
-            return asdict(segment)
+            result = asdict(segment)
+        runtime.persist_active_topology()
+        return result
 
     @app.post("/api/map/segments", status_code=status.HTTP_201_CREATED)
     def create_segment(payload: SegmentPayload) -> dict:
@@ -586,19 +610,30 @@ def create_app(
 
     @app.delete("/api/map/segments/{segment_id}")
     def delete_segment(segment_id: str) -> dict:
+        runtime.ensure_active_topology_editable()
         with runtime.map_lock:
             if segment_id not in runtime.traffic_map.segments:
                 raise HTTPException(status_code=404, detail="道路不存在")
             if not runtime.traffic_map.delete_segment(segment_id):
                 raise HTTPException(status_code=409, detail="至少需要保留一条道路")
             runtime.traffic_map.save()
-            return {"deleted": True, "segment_id": segment_id}
+        runtime.persist_active_topology()
+        return {"deleted": True, "segment_id": segment_id}
 
     @app.post("/api/map/reset-runtime")
     def reset_map_runtime() -> dict:
         with runtime.map_lock:
             runtime.traffic_map.reset_runtime()
         return {"reset": True}
+
+    if runtime.configuration_enabled:
+        app.include_router(
+            create_configuration_router(
+                runtime.configuration_service,
+                runtime.activation_coordinator,
+                runtime.import_export_service,
+            )
+        )
 
     app.mount("/static", StaticFiles(directory=config.frontend_dir), name="static")
 

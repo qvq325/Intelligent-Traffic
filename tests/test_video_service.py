@@ -1,7 +1,112 @@
-import numpy as np
+from dataclasses import replace
+from pathlib import Path
+import threading
 
+import numpy as np
+import pytest
+
+import backend.video_stream as video_stream_module
+from backend.model_pipelines import ModelPipelineOptions
 from backend.video_stream import VideoStreamService
+from detection_processor import DetectionResult
 from whitelist_manager import WhitelistManager
+
+
+def _pipeline_options(
+    scene_key="realtime",
+    *,
+    revision=1,
+    enabled=True,
+    preset="legacy",
+):
+    return ModelPipelineOptions(
+        scene_key=scene_key,
+        preset=preset,
+        enabled=enabled,
+        device_preference="cpu",
+        yolo_threshold=0.42,
+        lpr_threshold=0.73,
+        frame_interval=3,
+        inference_size=768,
+        parking_move_threshold=0.03,
+        mog_history=500,
+        mog_variance_threshold=25.0,
+        mog_min_area=150,
+        mog_min_duration=2.0,
+        mog_max_duration=5.0,
+        mog_warmup_frames=50,
+        revision=revision,
+        vehicle_model_path=Path(f"{scene_key}-vehicle.pt"),
+        plate_model_path=(
+            Path(f"{scene_key}-plate.pt") if preset == "trained" else None
+        ),
+        plate_mode="box" if preset == "trained" else "pose",
+        no_parking_mode="stationary" if preset == "trained" else "dwell",
+        road_abnormal_mode="mog" if preset == "trained" else "mog2",
+    )
+
+
+class _ProcessorDouble:
+    def __init__(self, *, initialize_result=True, init_error="load failed"):
+        self.initialize_result = initialize_result
+        self.init_error = init_error
+        self.is_initialized = False
+        self.has_lpr = True
+        self.yolo_threshold = None
+        self.lpr_threshold = None
+        self.process_calls = []
+        self.reset_tracking_calls = 0
+        self.on_process = None
+
+    def initialize(self):
+        self.is_initialized = self.initialize_result
+        return self.initialize_result
+
+    def process(self, frame, camera_id=""):
+        self.process_calls.append(
+            {
+                "camera_id": camera_id,
+                "yolo_threshold": self.yolo_threshold,
+                "lpr_threshold": self.lpr_threshold,
+            }
+        )
+        if self.on_process is not None:
+            return self.on_process(frame, camera_id)
+        return frame, []
+
+    def reset_tracking(self):
+        self.reset_tracking_calls += 1
+
+
+class _CaptureDouble:
+    def __init__(self, frames, *, on_exhausted=None):
+        self.frames = [frame.copy() for frame in frames]
+        self.on_exhausted = on_exhausted
+        self.released = False
+
+    def read(self):
+        if self.frames:
+            return True, self.frames.pop(0)
+        if self.on_exhausted is not None:
+            callback, self.on_exhausted = self.on_exhausted, None
+            callback()
+        return False, None
+
+    def release(self):
+        self.released = True
+
+    def get(self, _property):
+        return 30.0
+
+
+def _result(camera_id="camera-1"):
+    return DetectionResult(
+        vehicle_bbox=(0, 0, 4, 4),
+        vehicle_class="car",
+        vehicle_class_cn="汽车",
+        yolo_confidence=0.9,
+        camera_id=camera_id,
+    )
 
 
 def test_video_service_pause_state_and_source_switch():
@@ -70,3 +175,517 @@ def test_video_service_applies_optional_frame_processor():
     assert calls == ["camera-1"]
     assert result[0, 0, 2] == 255
     assert frame[0, 0, 2] == 0
+
+
+def test_video_service_defaults_to_realtime_and_exposes_explicit_scene_key():
+    legacy = VideoStreamService(WhitelistManager())
+    traffic_map = VideoStreamService(
+        WhitelistManager(),
+        scene_key="traffic_map",
+    )
+
+    assert legacy.scene_key == "realtime"
+    assert legacy.status()["scene_key"] == "realtime"
+    assert traffic_map.scene_key == "traffic_map"
+    assert traffic_map.status()["scene_key"] == "traffic_map"
+
+
+def test_pipeline_revision_rebuilds_only_the_matching_scene_processor():
+    factory_calls = []
+
+    def factory(options):
+        factory_calls.append((options.scene_key, options.revision))
+        return _ProcessorDouble()
+
+    realtime = VideoStreamService(
+        WhitelistManager(),
+        scene_key="realtime",
+        processor_factory=factory,
+    )
+    traffic_map = VideoStreamService(
+        WhitelistManager(),
+        scene_key="traffic_map",
+        processor_factory=factory,
+    )
+    realtime_options = _pipeline_options("realtime")
+    traffic_options = _pipeline_options("traffic_map")
+
+    realtime.apply_model_pipeline_options(realtime_options)
+    traffic_map.apply_model_pipeline_options(traffic_options)
+    realtime._ensure_processor()
+    traffic_map._ensure_processor()
+
+    realtime_revision = replace(realtime_options, revision=2, inference_size=896)
+    realtime.apply_model_pipeline_options(realtime_revision)
+    traffic_map.apply_model_pipeline_options(traffic_options)
+    realtime._ensure_processor()
+    traffic_map._ensure_processor()
+
+    assert factory_calls == [
+        ("realtime", 1),
+        ("traffic_map", 1),
+        ("realtime", 2),
+    ]
+    assert realtime.status()["detection"]["active_revision"] == 2
+    assert traffic_map.status()["detection"]["active_revision"] == 1
+
+
+def test_pipeline_options_must_match_the_service_scene():
+    service = VideoStreamService(
+        WhitelistManager(),
+        scene_key="traffic_map",
+        processor_factory=lambda _options: _ProcessorDouble(),
+    )
+
+    try:
+        service.apply_model_pipeline_options(_pipeline_options("realtime"))
+    except ValueError as exc:
+        assert "traffic_map" in str(exc)
+        assert "realtime" in str(exc)
+    else:
+        raise AssertionError("mismatched scene options were accepted")
+
+
+def test_default_processor_factory_maps_all_detection_options(monkeypatch):
+    calls = {}
+
+    class ProcessorDouble(_ProcessorDouble):
+        def __init__(self, **kwargs):
+            super().__init__()
+            calls["kwargs"] = kwargs
+
+    monkeypatch.setattr(video_stream_module, "DetectionProcessor", ProcessorDouble)
+    service = VideoStreamService(WhitelistManager(), scene_key="realtime")
+    options = _pipeline_options("realtime", preset="trained")
+
+    service.apply_model_pipeline_options(options)
+    service._ensure_processor()
+
+    assert calls["kwargs"] == {
+        "yolo_conf": 0.42,
+        "lpr_conf": 0.73,
+        "device": "cpu",
+        "vehicle_model_path": Path("realtime-vehicle.pt"),
+        "plate_model_path": Path("realtime-plate.pt"),
+        "inference_size": 768,
+        "lpr_mode": "box",
+    }
+
+
+def test_processor_initialization_runs_outside_the_condition_lock():
+    service = None
+    lock_was_available = threading.Event()
+
+    class LockProbeProcessor(_ProcessorDouble):
+        def initialize(self):
+            def acquire_condition():
+                with service._condition:
+                    lock_was_available.set()
+
+            probe = threading.Thread(target=acquire_condition)
+            probe.start()
+            probe.join(timeout=0.5)
+            self.is_initialized = lock_was_available.is_set()
+            return self.is_initialized
+
+    service = VideoStreamService(
+        WhitelistManager(),
+        processor_factory=lambda _options: LockProbeProcessor(),
+    )
+    service.apply_model_pipeline_options(_pipeline_options())
+
+    service._ensure_processor()
+
+    assert lock_was_available.is_set()
+    assert service.status()["detection"]["active_revision"] == 1
+
+
+def test_failed_replacement_preserves_initialized_processor_and_is_not_retried():
+    created = []
+
+    def factory(options):
+        processor = _ProcessorDouble(
+            initialize_result=options.revision == 1,
+            init_error=f"replacement failed: {options.vehicle_model_path}",
+        )
+        created.append(processor)
+        return processor
+
+    service = VideoStreamService(
+        WhitelistManager(),
+        processor_factory=factory,
+    )
+    initial = _pipeline_options(revision=1)
+    replacement = replace(initial, revision=2, inference_size=896)
+
+    service.apply_model_pipeline_options(initial)
+    service._ensure_processor()
+    active_processor = service._processor
+    service.apply_model_pipeline_options(replacement)
+    service._ensure_processor()
+
+    status = service.status()["detection"]
+    assert service._processor is active_processor
+    assert active_processor.is_initialized
+    assert status["enabled"] is True
+    assert status["active_revision"] == 1
+    assert status["desired_revision"] == 2
+    assert "replacement failed" in status["status"]
+
+    service._ensure_processor()
+    assert len(created) == 2
+    assert str(replacement.vehicle_model_path) not in repr(service.status())
+
+
+@pytest.mark.parametrize("separator_style", ("backslash", "slash", "mixed"))
+def test_failed_processor_redacts_windows_model_paths_case_insensitively(
+    separator_style,
+):
+    vehicle_path = Path(r"C:\Trusted\Models\Vehicle.pt")
+    plate_path = Path(r"C:\Trusted\Models\Plate.pt")
+    options = replace(
+        _pipeline_options(preset="trained"),
+        vehicle_model_path=vehicle_path,
+        plate_model_path=plate_path,
+    )
+
+    def error_path(path):
+        components = str(path).swapcase().replace("\\", "/").split("/")
+        if separator_style == "backslash":
+            return "\\".join(components)
+        if separator_style == "slash":
+            return "/".join(components)
+        return "".join(
+            component + ("\\" if index % 2 == 0 else "/")
+            for index, component in enumerate(components[:-1])
+        ) + components[-1]
+
+    load_error = (
+        f"processor unavailable: vehicle={error_path(vehicle_path)}; "
+        f"plate={error_path(plate_path)}"
+    )
+    service = VideoStreamService(
+        WhitelistManager(),
+        processor_factory=lambda _options: _ProcessorDouble(
+            initialize_result=False,
+            init_error=load_error,
+        ),
+    )
+
+    service.apply_model_pipeline_options(options)
+    service._ensure_processor()
+
+    status = service.status()["detection"]["status"]
+    normalized_status = status.casefold().replace("\\", "/")
+    assert "processor unavailable" in status
+    assert status.count("[model]") == 2
+    for path in (vehicle_path, plate_path):
+        assert str(path).casefold().replace("\\", "/") not in normalized_status
+        rendered = error_path(path)
+        assert rendered.casefold() not in status.casefold()
+        assert rendered.casefold().replace("\\", "/") not in normalized_status
+
+
+def test_failed_replacement_keeps_active_thresholds_and_interval(monkeypatch):
+    processors = {}
+    initial = replace(
+        _pipeline_options(revision=1),
+        yolo_threshold=0.21,
+        lpr_threshold=0.31,
+        frame_interval=1,
+        vehicle_model_path=Path("revision-1.pt"),
+    )
+    replacement = replace(
+        initial,
+        revision=2,
+        yolo_threshold=0.91,
+        lpr_threshold=0.81,
+        frame_interval=4,
+        vehicle_model_path=Path("revision-2.pt"),
+    )
+
+    def factory(options):
+        processor = _ProcessorDouble(
+            initialize_result=options.revision == 1,
+            init_error="replacement unavailable",
+        )
+        processors[options.revision] = processor
+        return processor
+
+    service = VideoStreamService(WhitelistManager(), processor_factory=factory)
+    service.apply_model_pipeline_options(initial)
+    service._ensure_processor()
+    active = processors[1]
+    service.apply_model_pipeline_options(replacement)
+    service._ensure_processor()
+
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    capture = _CaptureDouble(
+        [frame],
+        on_exhausted=service._stop_event.set,
+    )
+    monkeypatch.setattr(service, "_open_capture", lambda _source: capture)
+    monkeypatch.setattr(
+        service,
+        "_publish_frame",
+        lambda _frame, _snapshot=None: True,
+    )
+    service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
+
+    service._run()
+
+    runtime = service._settings_snapshot()
+    assert runtime.yolo_threshold == 0.21
+    assert runtime.lpr_threshold == 0.31
+    assert runtime.interval == 1
+    assert active.process_calls == [
+        {
+            "camera_id": "camera-1",
+            "yolo_threshold": 0.21,
+            "lpr_threshold": 0.31,
+        }
+    ]
+    assert active.yolo_threshold == 0.21
+    assert active.lpr_threshold == 0.31
+
+
+def test_disable_discards_inflight_processor_results_and_annotation(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    callbacks = []
+    published_frames = []
+    processor = _ProcessorDouble()
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    def process(blocked_frame, _camera_id):
+        started.set()
+        release.wait(timeout=5.0)
+        service._stop_event.set()
+        return np.full_like(blocked_frame, 255), [_result()]
+
+    processor.on_process = process
+    service = VideoStreamService(
+        WhitelistManager(),
+        processor_factory=lambda _options: processor,
+    )
+    service.add_detection_listener(
+        lambda camera_id, results, _resolution: callbacks.append(
+            (camera_id, list(results))
+        )
+    )
+    service.apply_model_pipeline_options(
+        replace(_pipeline_options(), frame_interval=1)
+    )
+    service._ensure_processor()
+    capture = _CaptureDouble([frame], on_exhausted=service._stop_event.set)
+    monkeypatch.setattr(service, "_open_capture", lambda _source: capture)
+    monkeypatch.setattr(
+        service,
+        "_publish_frame",
+        lambda annotated, _snapshot=None: (
+            published_frames.append(annotated.copy()) or True
+        ),
+    )
+    service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
+    worker = threading.Thread(target=service._run)
+    worker.start()
+    assert started.wait(timeout=2.0)
+
+    service.update_detection_settings(enabled=False)
+    release.set()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert service.status()["results"] == []
+    assert callbacks == []
+    assert len(published_frames) == 1
+    assert np.array_equal(published_frames[0], frame)
+
+
+def test_disable_during_encoding_does_not_commit_stale_annotation(monkeypatch):
+    encoding_started = threading.Event()
+    release_encoding = threading.Event()
+    processor = _ProcessorDouble()
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    annotated_jpeg = b"annotated-jpeg"
+
+    processor.on_process = lambda blocked_frame, _camera_id: (
+        np.full_like(blocked_frame, 255),
+        [_result()],
+    )
+    service = VideoStreamService(
+        WhitelistManager(),
+        processor_factory=lambda _options: processor,
+    )
+    service.apply_model_pipeline_options(
+        replace(_pipeline_options(), frame_interval=1)
+    )
+    service._ensure_processor()
+    capture = _CaptureDouble([frame], on_exhausted=service._stop_event.set)
+    monkeypatch.setattr(service, "_open_capture", lambda _source: capture)
+
+    def encode(_extension, encoded_frame, _parameters):
+        if np.all(encoded_frame == 255):
+            encoding_started.set()
+            assert release_encoding.wait(timeout=5.0)
+            return True, np.frombuffer(annotated_jpeg, dtype=np.uint8)
+        return True, np.frombuffer(b"raw-jpeg", dtype=np.uint8)
+
+    monkeypatch.setattr(video_stream_module.cv2, "imencode", encode)
+    service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
+    worker = threading.Thread(target=service._run)
+    worker.start()
+    assert encoding_started.wait(timeout=2.0)
+
+    service.update_detection_settings(enabled=False)
+    release_encoding.set()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert service.latest_frame() != annotated_jpeg
+
+
+def test_disable_during_first_listener_prevents_later_listener_callback():
+    first_started = threading.Event()
+    release_first = threading.Event()
+    callbacks = []
+    processor = _ProcessorDouble()
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    service = VideoStreamService(
+        WhitelistManager(),
+        processor_factory=lambda _options: processor,
+    )
+
+    def first_listener(_camera_id, _results, _resolution):
+        callbacks.append("first")
+        first_started.set()
+        assert release_first.wait(timeout=5.0)
+
+    def second_listener(_camera_id, _results, _resolution):
+        callbacks.append("second")
+
+    service.add_detection_listener(first_listener)
+    service.add_detection_listener(second_listener)
+    service.apply_model_pipeline_options(_pipeline_options())
+    service._ensure_processor()
+    service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
+    snapshot = service._processing_snapshot()
+    worker = threading.Thread(
+        target=service._publish_results,
+        args=(service._requested_source, [_result()], frame, snapshot),
+    )
+    worker.start()
+    assert first_started.wait(timeout=2.0)
+
+    service.update_detection_settings(enabled=False)
+    release_first.set()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert callbacks == ["first"]
+
+
+def test_successful_swap_clears_results_and_does_not_draw_old_cache(monkeypatch):
+    first_frame_published = threading.Event()
+    release_second_frame = threading.Event()
+    published_frames = []
+    cached_draws = []
+    processors = {}
+    initial = replace(_pipeline_options(revision=1), frame_interval=1)
+    replacement = replace(
+        initial,
+        revision=2,
+        frame_interval=100,
+        vehicle_model_path=Path("revision-2.pt"),
+    )
+
+    def factory(options):
+        processor = _ProcessorDouble()
+        if options.revision == 1:
+            processor.on_process = lambda frame, _camera_id: (
+                np.full_like(frame, 90),
+                [_result()],
+            )
+        processors[options.revision] = processor
+        return processor
+
+    service = VideoStreamService(WhitelistManager(), processor_factory=factory)
+    service.apply_model_pipeline_options(initial)
+    service._ensure_processor()
+    frames = [
+        np.zeros((8, 8, 3), dtype=np.uint8),
+        np.full((8, 8, 3), 10, dtype=np.uint8),
+    ]
+    capture = _CaptureDouble(frames, on_exhausted=service._stop_event.set)
+    monkeypatch.setattr(service, "_open_capture", lambda _source: capture)
+
+    def publish_frame(frame, _snapshot=None):
+        published_frames.append(frame.copy())
+        if len(published_frames) == 1:
+            first_frame_published.set()
+            release_second_frame.wait(timeout=5.0)
+        else:
+            service._stop_event.set()
+        return True
+
+    monkeypatch.setattr(service, "_publish_frame", publish_frame)
+    monkeypatch.setattr(
+        service,
+        "_draw_cached_results",
+        lambda frame, results: (
+            cached_draws.append(list(results)) or np.full_like(frame, 200)
+        ),
+    )
+    service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
+    worker = threading.Thread(target=service._run)
+    worker.start()
+    assert first_frame_published.wait(timeout=2.0)
+
+    service.apply_model_pipeline_options(replacement)
+    service._ensure_processor()
+    results_immediately_after_swap = service.status()["results"]
+    release_second_frame.set()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert results_immediately_after_swap == []
+    assert service.status()["results"] == []
+    assert cached_draws == []
+    assert len(processors[2].process_calls) == 0
+
+
+def test_malformed_replacement_is_rejected_before_swap_and_not_retried():
+    factory_calls = []
+    initial = _pipeline_options(revision=1)
+    replacement = replace(
+        initial,
+        revision=2,
+        vehicle_model_path=Path(r"C:\Trusted\Models\Revision2.pt"),
+    )
+    active = _ProcessorDouble()
+
+    class MalformedProcessor:
+        is_initialized = True
+
+        def initialize(self):
+            return True
+
+    def factory(options):
+        factory_calls.append(options.revision)
+        return active if options.revision == 1 else MalformedProcessor()
+
+    service = VideoStreamService(WhitelistManager(), processor_factory=factory)
+    service.apply_model_pipeline_options(initial)
+    service._ensure_processor()
+    service.apply_model_pipeline_options(replacement)
+
+    service._ensure_processor()
+
+    status = service.status()["detection"]
+    assert service._processor is active
+    assert status["active_revision"] == 1
+    assert status["desired_revision"] == 2
+    assert "processor protocol invalid" in status["status"]
+    assert str(replacement.vehicle_model_path).casefold() not in repr(status).casefold()
+    service._ensure_processor()
+    assert factory_calls == [1, 2]

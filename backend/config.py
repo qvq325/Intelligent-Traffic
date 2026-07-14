@@ -38,6 +38,7 @@ class AppConfig:
     upload_dir: Path
     map_upload_dir: Path
     stream_sources: Mapping[str, str]
+    configuration_dir: Path | None = None
 
 
 def default_config() -> AppConfig:
@@ -51,4 +52,5 @@ def default_config() -> AppConfig:
         upload_dir=runtime_dir / "uploads",
         map_upload_dir=runtime_dir / "maps",
         stream_sources=STREAM_SOURCES,
+        configuration_dir=runtime_dir / "config",
     )

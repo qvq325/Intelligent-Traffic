@@ -27,6 +27,22 @@ def test_multi_camera_preview_service_tracks_configured_sources():
     assert not service.has_source("missing")
 
 
+def test_preview_service_reconfigure_preserves_unchanged_channels():
+    service = MultiCameraPreviewService(
+        {"camera-a": "rtsp://example.test/a", "camera-b": "rtsp://example.test/b"}
+    )
+    original_a = service._channels["camera-a"]
+    original_b = service._channels["camera-b"]
+
+    result = service.reconfigure(
+        {"camera-a": "rtsp://example.test/a", "camera-b": "rtsp://example.test/new"}
+    )
+
+    assert result == {"changed": ["camera-b"], "removed": []}
+    assert service._channels["camera-a"] is original_a
+    assert service._channels["camera-b"] is not original_b
+
+
 def test_preview_subscription_releases_channel(monkeypatch):
     service = MultiCameraPreviewService({"camera-1": "rtsp://127.0.0.1/live/1"})
     channel = service._channels["camera-1"]

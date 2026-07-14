@@ -36,13 +36,23 @@ uv run python main.py
 
 打开 <http://127.0.0.1:8000>。OpenAPI 文档位于 <http://127.0.0.1:8000/docs>。
 
-监听地址和端口可通过环境变量调整：
+启动时会自动读取项目根目录的 `.env`。复制示例文件后修改监听地址或端口：
 
 ```powershell
-$env:VIDEOTEST_HOST = "0.0.0.0"
-$env:VIDEOTEST_PORT = "8080"
+Copy-Item .env.example .env
+```
+
+```dotenv
+VIDEOTEST_HOST=0.0.0.0
+VIDEOTEST_PORT=8080
+```
+
+```powershell
 uv run python main.py
 ```
+
+直接运行 `main.py` 时，系统环境变量优先于 `.env`。使用 `start.ps1` 或 `stop.ps1` 时，
+显式传入的 `-ListenHost`、`-Port` 参数优先，其次依次读取 `.env`、系统环境变量和默认值。
 
 ## Web 功能
 

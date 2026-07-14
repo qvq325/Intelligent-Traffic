@@ -10,6 +10,9 @@ __pycache__/
 .hypothesis/
 .tox/
 .nox/
+/test-results/
+/playwright-report/
+/blob-report/
 .coverage
 .coverage.*
 coverage.xml
@@ -38,6 +41,8 @@ result_*/
 output/
 outputs/
 screenshot_*.jpg
+screenshots/
+stream_output/
 runtime/
 
 # Local environment variables
@@ -50,6 +55,10 @@ runtime/
 .vscode/
 *.code-workspace
 .claude/settings.local.json
+/.superpowers/
+
+# Local restore snapshots
+/data-store-copy/restore-rollback/
 
 # Operating-system files
 .DS_Store

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -53,7 +53,7 @@ class LPRRecognizer:
         self,
         conf_threshold: float = 0.7,
         device: str = "cpu",
-        detector_model: Path = DEFAULT_DETECTOR_MODEL,
+        detector_model: Path | None = DEFAULT_DETECTOR_MODEL,
         recognizer_model: Path = DEFAULT_RECOGNIZER_MODEL,
         detector_conf: float = 0.3,
         detector_iou: float = 0.5,
@@ -69,14 +69,19 @@ class LPRRecognizer:
         self.image_size = image_size
         self.use_half = self.device.type == "cuda"
 
-        detector_path = Path(detector_model)
         recognizer_path = Path(recognizer_model)
-        for model_path in (detector_path, recognizer_path):
+        detector_path = Path(detector_model) if detector_model is not None else None
+        model_paths = [recognizer_path]
+        if detector_path is not None:
+            model_paths.insert(0, detector_path)
+        for model_path in model_paths:
             if not model_path.is_file():
                 raise FileNotFoundError(f"车牌模型不存在: {model_path}")
 
-        self.detector = YOLO(str(detector_path))
-        self.detector.to(self.device)
+        self.detector = None
+        if detector_path is not None:
+            self.detector = YOLO(str(detector_path))
+            self.detector.to(self.device)
         self.recognizer = self._load_recognizer(recognizer_path)
 
     def _load_recognizer(self, model_path: Path) -> PlateOCRNet:
@@ -177,6 +182,8 @@ class LPRRecognizer:
     def recognize(self, image: np.ndarray) -> List[PlateRecognition]:
         if image is None or image.size == 0:
             return []
+        if self.detector is None:
+            raise RuntimeError("OCR-only recognizer requires recognize_crops()")
 
         with torch.inference_mode():
             detections = self.detector.predict(
@@ -202,30 +209,51 @@ class LPRRecognizer:
                     continue
                 if int(result.boxes.cls[index]) == 1:
                     plate = self._merge_double_plate(plate)
+                x1, y1, x2, y2 = box.astype(int)
+                height, width = image.shape[:2]
+                bbox = (
+                    int(max(0, min(x1, width - 1))),
+                    int(max(0, min(y1, height - 1))),
+                    int(max(1, min(x2, width))),
+                    int(max(1, min(y2, height))),
+                )
                 rectified.append(plate)
-                metadata.append(box)
+                metadata.append(bbox)
 
-        if not rectified:
+        return self.recognize_crops(rectified, metadata)
+
+    def recognize_crops(
+        self,
+        crops: Sequence[np.ndarray],
+        bboxes: Sequence[Tuple[int, int, int, int]],
+    ) -> List[PlateRecognition]:
+        """Recognize already-localized plate crops using only the CRNN boundary."""
+        if len(crops) != len(bboxes):
+            raise ValueError("crops and bboxes must have the same length")
+
+        valid_pairs = [
+            (crop, tuple(int(value) for value in bbox))
+            for crop, bbox in zip(crops, bboxes)
+            if crop is not None and crop.size > 0
+        ]
+        if not valid_pairs:
             return []
 
-        batch = self._prepare_batch(rectified)
+        valid_crops, valid_bboxes = zip(*valid_pairs)
+        batch = self._prepare_batch(list(valid_crops))
         with torch.inference_mode():
             sequences, color_logits = self.recognizer(batch)
             color_indices = color_logits.float().argmax(dim=-1).detach().cpu().tolist()
 
         recognized = []
-        height, width = image.shape[:2]
-        for sequence, color_index, box in zip(sequences, color_indices, metadata):
+        for sequence, color_index, bbox in zip(
+            sequences,
+            color_indices,
+            valid_bboxes,
+        ):
             text, confidence = self._decode(sequence)
             if not text or confidence < self.conf_threshold:
                 continue
-            x1, y1, x2, y2 = box.astype(int)
-            bbox = (
-                int(max(0, min(x1, width - 1))),
-                int(max(0, min(y1, height - 1))),
-                int(max(1, min(x2, width))),
-                int(max(1, min(y2, height))),
-            )
             recognized.append(
                 PlateRecognition(
                     plate_text=text,

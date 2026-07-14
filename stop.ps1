@@ -11,6 +11,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProjectRoot = $PSScriptRoot
 
 function Get-VideoTestHealth {
     param([string]$BaseUrl)
@@ -36,12 +37,45 @@ function Get-PortListeners {
     )
 }
 
-if (-not $PSBoundParameters.ContainsKey("ListenHost") -and $env:VIDEOTEST_HOST) {
-    $ListenHost = $env:VIDEOTEST_HOST
+$uv = Get-Command uv -ErrorAction SilentlyContinue
+if (-not $uv) {
+    throw "uv was not found. Install it from https://docs.astral.sh/uv/ and run this script again."
 }
-if (-not $PSBoundParameters.ContainsKey("Port") -and $env:VIDEOTEST_PORT) {
+
+Set-Location -LiteralPath $ProjectRoot
+
+$serverConfigScript = @'
+import json
+import os
+from pathlib import Path
+
+from dotenv import dotenv_values
+
+dotenv = dotenv_values(Path.cwd() / ".env")
+print(json.dumps({
+    "host": dotenv.get("VIDEOTEST_HOST") or os.getenv("VIDEOTEST_HOST") or "127.0.0.1",
+    "port": dotenv.get("VIDEOTEST_PORT") or os.getenv("VIDEOTEST_PORT") or "8000",
+}))
+'@
+$serverConfigJson = & $uv.Source run --no-sync python -c $serverConfigScript
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to load server configuration from .env."
+}
+
+try {
+    $serverConfig = $serverConfigJson | ConvertFrom-Json -ErrorAction Stop
+}
+catch {
+    throw "Failed to parse server configuration: $($_.Exception.Message)"
+}
+
+if (-not $PSBoundParameters.ContainsKey("ListenHost")) {
+    $ListenHost = [string]$serverConfig.host
+}
+if (-not $PSBoundParameters.ContainsKey("Port")) {
     $parsedPort = 0
-    if (-not [int]::TryParse($env:VIDEOTEST_PORT, [ref]$parsedPort)) {
+    $configuredPort = [string]$serverConfig.port
+    if (-not [int]::TryParse($configuredPort, [ref]$parsedPort)) {
         throw "VIDEOTEST_PORT must be an integer."
     }
     if ($parsedPort -lt 1 -or $parsedPort -gt 65535) {

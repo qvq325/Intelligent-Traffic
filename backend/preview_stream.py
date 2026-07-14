@@ -211,6 +211,39 @@ class MultiCameraPreviewService:
     def has_source(self, source_id: str) -> bool:
         return source_id in self._channels
 
+    def reconfigure(self, sources: Mapping[str, str]) -> dict[str, list[str]]:
+        """Atomically replace configured URLs while preserving unchanged caches."""
+        self._prewarm_cancel_event.set()
+        with self._prewarm_lock:
+            prewarm_thread = self._prewarm_thread
+        if prewarm_thread and prewarm_thread.is_alive():
+            prewarm_thread.join(timeout=9.0)
+
+        previous = self._channels
+        replacement: dict[str, PreviewChannel] = {}
+        changed: list[str] = []
+        removed = sorted(set(previous) - set(sources))
+        for source_id, url in sources.items():
+            channel = previous.get(source_id)
+            if channel is not None and channel.url == url:
+                replacement[source_id] = channel
+                continue
+            changed.append(source_id)
+            replacement[source_id] = PreviewChannel(source_id, url)
+
+        retired = [
+            channel
+            for source_id, channel in previous.items()
+            if source_id not in replacement or replacement[source_id] is not channel
+        ]
+        self._channels = replacement
+        for channel in retired:
+            channel.request_stop()
+        for channel in retired:
+            channel.join()
+        self._prewarm_cancel_event.clear()
+        return {"changed": sorted(changed), "removed": removed}
+
     def prewarm(self, source_ids: Iterable[str] | None = None) -> list[str]:
         requested = list(self._channels if source_ids is None else source_ids)
         with self._prewarm_lock:

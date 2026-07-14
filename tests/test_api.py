@@ -39,6 +39,57 @@ def test_frontend_and_system_catalog_are_served(client):
     assert client.get("/api/health").json()["status"] == "ok"
 
 
+def test_system_management_workspace_and_safe_import_contract_are_served(client):
+    index = client.get("/").text
+    script = client.get("/static/js/system-management.js").text
+    styles = client.get("/static/styles.css").text
+
+    assert 'data-view="system"' in index
+    assert 'id="view-system"' in index
+    assert index.count("data-system-tab=") == 9
+    assert 'id="system-confirm-dialog"' in index
+    assert 'jsonRequest("POST", { confirm: true })' in script
+    assert 'request("/streams?reveal_credentials=true")' in script
+    assert "grid-template-columns: repeat(6, minmax(0, 1fr))" in styles
+    assert ".system-tabs" in styles and "overflow-x: auto" in styles
+
+
+def test_system_management_stream_batch_controls_are_served(client):
+    index = client.get("/").text
+    script = client.get("/static/js/system-management.js").text
+    styles = client.get("/static/styles.css").text
+
+    assert 'id="system-stream-select-all"' in index
+    assert 'id="system-stream-selection-count"' in index
+    assert 'data-system-action="probe-stream-batch"' in index
+    assert 'data-system-action="new-stream-batch"' in index
+    assert 'data-system-action="edit-stream-batch"' in index
+    assert 'data-system-action="delete-stream-batch"' in index
+    assert "state.selectedStreams = new Set(" in script
+    assert "[...state.selectedStreams].filter" in script
+    assert "const targetIds = selectedIds.length" in script
+    assert "validateStreamBatchRows(list, {" in script
+    assert "ignoreBlank: true" in script
+    assert "existingNames.has(name)" in script
+    assert 'type: "password"' in script
+    assert 'jsonRequest("DELETE", { stream_ids: streamIds })' in script
+    assert ".system-stream-batch-toolbar" in styles
+    assert ".system-select-column" in styles
+    assert "min-width: 980px" in styles
+
+
+def test_stream_profile_activation_uses_preflight_token_and_immediate_progress(client):
+    index = client.get("/").text
+    script = client.get("/static/js/system-management.js").text
+
+    assert "pendingStreamProfileActions: new Set()" in script
+    assert 'status: "preflighting"' in script
+    assert 'status: "applying"' in script
+    assert "preflight_token: report.preflight_token" in script
+    assert 'jsonRequest("POST", {' in script
+    assert 'data-lucide="package-input"' not in index
+
+
 def test_stream_selection_pause_and_detection_settings(client):
     selected = client.post("/api/stream/select", json={"source_id": "道路1"})
     assert selected.status_code == 200
@@ -383,8 +434,10 @@ def test_no_parking_scene_workflow_and_runtime_controls(client, monkeypatch):
     assert started.status_code == 200
     assert started.json()["running"] is True
     assert client.app.state.runtime.video.on_detections is None
-    assert client.app.state.runtime.video._detection_listeners
-    assert road_stop_calls == [True]
+    assert client.app.state.runtime.video._detection_listeners == []
+    assert client.app.state.runtime.no_parking_video.on_detections is not None
+    assert client.app.state.runtime.no_parking_video.status()["active_source"]["id"] == "道路1"
+    assert road_stop_calls == []
 
     stopped = client.post("/api/no-parking/stop")
     assert stopped.json()["running"] is False
@@ -454,7 +507,7 @@ def test_road_abnormal_scene_workflow_and_runtime_controls(client):
 
     enabled = client.put("/api/detection/settings", json={"enabled": True})
     assert enabled.status_code == 200
-    assert client.get("/api/road-abnormal/status").json()["running"] is False
+    assert client.get("/api/road-abnormal/status").json()["running"] is True
 
     restarted = client.post("/api/road-abnormal/start", json={"scene_id": scene_id})
     assert restarted.status_code == 200
@@ -462,7 +515,8 @@ def test_road_abnormal_scene_workflow_and_runtime_controls(client):
 
     switched = client.post("/api/stream/select", json={"source_id": "道路2"})
     assert switched.status_code == 200
-    assert client.get("/api/road-abnormal/status").json()["running"] is False
+    assert client.get("/api/road-abnormal/status").json()["running"] is True
+    assert client.app.state.runtime.road_abnormal_video.status()["active_source"]["id"] == "道路1"
 
     client.post("/api/stream/select", json={"source_id": "道路1"})
     client.post("/api/road-abnormal/start", json={"scene_id": scene_id})

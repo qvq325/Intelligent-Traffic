@@ -6,10 +6,12 @@ import cv2
 import numpy as np
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from vehicle_detector import VehicleDetector, VehicleDetection, HAS_YOLO
 from lpr_recognizer import LPRRecognizer, PlateRecognition, HAS_PLATE_RECOGNIZER
+from trained_plate_recognizer import BoxPlateRecognizer
 from whitelist_manager import WhitelistManager, MatchResult
 from draw_utils import (
     draw_vehicle_box, draw_plate_info, draw_info_panel,
@@ -73,13 +75,27 @@ class DetectionProcessor:
         yolo_conf: float = 0.5,
         lpr_conf: float = 0.7,
         device: str = "cpu",
+        vehicle_model_path: str | Path | None = None,
+        plate_model_path: str | Path | None = None,
+        inference_size: int = 640,
+        lpr_mode: str = "pose",
     ):
+        normalized_lpr_mode = lpr_mode.lower().strip()
+        if normalized_lpr_mode not in {"pose", "box"}:
+            raise ValueError("lpr_mode must be 'pose' or 'box'")
+        if normalized_lpr_mode == "box" and plate_model_path is None:
+            raise ValueError("box lpr_mode requires plate_model_path")
+
         self._yolo_conf = yolo_conf
         self._lpr_conf = lpr_conf
         self._device = self._detect_device(device)
+        self._vehicle_model_path = vehicle_model_path
+        self._plate_model_path = plate_model_path
+        self._inference_size = inference_size
+        self._lpr_mode = normalized_lpr_mode
 
         self.vehicle_detector: Optional[VehicleDetector] = None
-        self.lpr_recognizer: Optional[LPRRecognizer] = None
+        self.lpr_recognizer: Optional[LPRRecognizer | BoxPlateRecognizer] = None
         self.whitelist_manager = WhitelistManager()
 
         self._initialized = False
@@ -181,9 +197,15 @@ class DetectionProcessor:
         # 初始化 YOLO 车辆检测器
         if HAS_YOLO:
             try:
+                vehicle_options = {
+                    "conf_threshold": self._yolo_conf,
+                    "device": self._device,
+                    "inference_size": self._inference_size,
+                }
+                if self._vehicle_model_path is not None:
+                    vehicle_options["model_path"] = self._vehicle_model_path
                 self.vehicle_detector = VehicleDetector(
-                    conf_threshold=self._yolo_conf,
-                    device=self._device,
+                    **vehicle_options,
                 )
                 print(f"[DetectionProcessor] YOLOv11m 加载成功 (device={self._device})")
             except Exception as e:
@@ -198,10 +220,26 @@ class DetectionProcessor:
         # 初始化 GPU 车牌检测与识别器
         if HAS_PLATE_RECOGNIZER:
             try:
-                self.lpr_recognizer = LPRRecognizer(
-                    conf_threshold=self._lpr_conf,
-                    device=self._device,
-                )
+                if self._lpr_mode == "box":
+                    if self._plate_model_path is None:
+                        raise ValueError("box 车牌识别模式需要 plate_model_path")
+                    self.lpr_recognizer = BoxPlateRecognizer(
+                        model_path=self._plate_model_path,
+                        conf_threshold=self._lpr_conf,
+                        device=self._device,
+                        inference_size=self._inference_size,
+                    )
+                elif self._lpr_mode == "pose":
+                    lpr_options = {
+                        "conf_threshold": self._lpr_conf,
+                        "device": self._device,
+                        "image_size": self._inference_size,
+                    }
+                    if self._plate_model_path is not None:
+                        lpr_options["detector_model"] = self._plate_model_path
+                    self.lpr_recognizer = LPRRecognizer(**lpr_options)
+                else:
+                    raise ValueError(f"不支持的车牌识别模式: {self._lpr_mode}")
                 print(f"[DetectionProcessor] 中文车牌识别模型加载成功 (device={self._device})")
             except Exception as e:
                 self._init_error = f"车牌识别模型加载失败: {e}"

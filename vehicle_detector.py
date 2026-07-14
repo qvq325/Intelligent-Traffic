@@ -5,6 +5,7 @@ YOLOv11m 车辆检测模块
 import cv2
 import numpy as np
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 try:
@@ -58,8 +59,11 @@ class VehicleDetector:
         self,
         conf_threshold: float = 0.5,
         device: str = "cpu",
-        model_name: str = "yolo11m.pt",
-        imgsz: int = 640,
+        model_path: str | Path | None = None,
+        inference_size: int | None = None,
+        *,
+        model_name: str | Path | None = None,
+        imgsz: int | None = None,
     ):
         """
         初始化车辆检测器
@@ -67,9 +71,21 @@ class VehicleDetector:
         Args:
             conf_threshold: 检测置信度阈值 (0-1)，低于此值的检测结果将被过滤
             device: 推理设备 ("cpu", "cuda", "cuda:0", "mps" 等)
-            model_name: YOLO 模型名称或路径
-            imgsz: 推理时的图像尺寸
+            model_path: YOLO 模型名称或路径
+            inference_size: 推理时的图像尺寸
+            model_name: ``model_path`` 的旧关键字别名
+            imgsz: ``inference_size`` 的旧关键字别名
         """
+        if model_path is None:
+            model_path = model_name if model_name is not None else "yolo11m.pt"
+        elif model_name is not None and Path(model_path) != Path(model_name):
+            raise ValueError("model_path and model_name must refer to the same model")
+
+        if inference_size is None:
+            inference_size = imgsz if imgsz is not None else 640
+        elif imgsz is not None and inference_size != imgsz:
+            raise ValueError("inference_size and imgsz must have the same value")
+
         if not HAS_YOLO:
             raise ImportError(
                 "未安装 ultralytics 库，请运行: pip install ultralytics"
@@ -77,10 +93,12 @@ class VehicleDetector:
 
         self.conf_threshold = conf_threshold
         self.device = device
-        self.imgsz = imgsz
+        self.model_path = model_path
+        self.inference_size = inference_size
+        self.imgsz = inference_size
 
         # 加载模型（首次运行会自动下载 yolo11m.pt）
-        self.model = YOLO(model_name)
+        self.model = YOLO(str(model_path))
         tracker_config = IterableSimpleNamespace(**YAML.load(check_yaml("bytetrack.yaml")))
         tracker_config.device = device
         self._tracker_config = tracker_config

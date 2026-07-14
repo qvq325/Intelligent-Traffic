@@ -1,0 +1,26 @@
+{
+  "manifest_version": 1,
+  "project": "VideoTest",
+  "backup_created_at": "2026-07-13T22:36:15.3705880+08:00",
+  "source_commit": "f6249ecda3cf69c5a402033e81ca2d89cc347fd2",
+  "topology": {
+    "version": 3,
+    "segment_count": 13,
+    "camera_count": 12,
+    "map_image": "sandpan/沙盘平面图1.png"
+  },
+  "files": [
+    {
+      "project_path": "traffic_map.json",
+      "backup_path": "backup/traffic_map.json",
+      "size": 7900,
+      "sha256": "4e3f2eafd9a11f4dd5143555a5b7306bee60110b559683401a5d99b785094a5f"
+    },
+    {
+      "project_path": "sandpan/沙盘平面图1.png",
+      "backup_path": "backup/sandpan/沙盘平面图1.png",
+      "size": 327626,
+      "sha256": "b5b4dca6018f7db30748e0cd8c82ec2d1793c5747860ab122198e5d37bc5a0c4"
+    }
+  ]
+}

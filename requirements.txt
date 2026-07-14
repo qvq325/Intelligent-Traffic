@@ -134,7 +134,9 @@ pyparsing==3.3.2
 python-dateutil==2.9.0.post0
     # via matplotlib
 python-dotenv==1.2.2
-    # via uvicorn
+    # via
+    #   uvicorn
+    #   video-test
 python-multipart==0.0.32
     # via video-test
 pyyaml==6.0.3

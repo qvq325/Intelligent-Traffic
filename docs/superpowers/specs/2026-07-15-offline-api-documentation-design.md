@@ -14,11 +14,14 @@ Vendor the Apache-2.0 `swagger-ui-dist` 5.32.8 browser assets with the
 application. This avoids a new runtime dependency and makes the primary API
 documentation route independent of Internet access.
 
-The repository will contain only the files needed by the page:
+The repository will contain only the browser files used by the page and the
+license materials required by their distribution:
 
 - `frontend/vendor/swagger-ui/swagger-ui-bundle.js`
 - `frontend/vendor/swagger-ui/swagger-ui.css`
 - `frontend/vendor/swagger-ui/LICENSE`
+- `frontend/vendor/swagger-ui/NOTICE`
+- `frontend/vendor/swagger-ui/swagger-ui-bundle.js.LICENSE.txt`
 
 The upstream package version and source will also be recorded in
 `THIRD_PARTY_NOTICES.md`. Source maps and unused distribution files will not be

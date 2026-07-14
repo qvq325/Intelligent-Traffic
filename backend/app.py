@@ -12,7 +12,8 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
@@ -105,10 +106,28 @@ def create_app(
     app = FastAPI(
         title="沙盘交通智控台 API",
         version="1.0.0",
+        docs_url=None,
         lifespan=lifespan,
     )
     app.state.runtime = runtime
     app.state.preview_stream = preview_stream
+
+    @app.get("/docs", include_in_schema=False)
+    def api_docs() -> HTMLResponse:
+        return get_swagger_ui_html(
+            openapi_url=app.openapi_url,
+            title=f"{app.title} - Swagger UI",
+            oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
+            init_oauth=app.swagger_ui_init_oauth,
+            swagger_ui_parameters=app.swagger_ui_parameters,
+            swagger_js_url="/static/vendor/swagger-ui/swagger-ui-bundle.js",
+            swagger_css_url="/static/vendor/swagger-ui/swagger-ui.css",
+            swagger_favicon_url="data:,",
+        )
+
+    @app.get(app.swagger_ui_oauth2_redirect_url, include_in_schema=False)
+    def swagger_ui_redirect() -> HTMLResponse:
+        return get_swagger_ui_oauth2_redirect_html()
 
     @app.exception_handler(ConfigurationError)
     async def configuration_error_handler(_, exc: ConfigurationError) -> JSONResponse:

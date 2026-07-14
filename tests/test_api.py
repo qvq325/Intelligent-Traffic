@@ -39,6 +39,26 @@ def test_frontend_and_system_catalog_are_served(client):
     assert client.get("/api/health").json()["status"] == "ok"
 
 
+def test_api_documentation_uses_local_assets(client):
+    docs = client.get("/docs")
+
+    assert docs.status_code == 200
+    assert "/static/vendor/swagger-ui/swagger-ui.css" in docs.text
+    assert "/static/vendor/swagger-ui/swagger-ui-bundle.js" in docs.text
+    assert "http://" not in docs.text
+    assert "https://" not in docs.text
+
+    stylesheet = client.get("/static/vendor/swagger-ui/swagger-ui.css")
+    javascript = client.get("/static/vendor/swagger-ui/swagger-ui-bundle.js")
+    assert stylesheet.status_code == 200
+    assert stylesheet.headers["content-type"].startswith("text/css")
+    assert javascript.status_code == 200
+    assert "javascript" in javascript.headers["content-type"]
+
+    assert client.get("/openapi.json").status_code == 200
+    assert client.get("/docs/oauth2-redirect").status_code == 200
+
+
 def test_system_management_workspace_and_safe_import_contract_are_served(client):
     index = client.get("/").text
     script = client.get("/static/js/system-management.js").text

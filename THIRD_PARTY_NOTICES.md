@@ -1,4 +1,18 @@
-# Third-party models
+# Third-party software and models
+
+## Swagger UI
+
+The offline API documentation uses `swagger-ui-dist`:
+
+- Upstream: https://github.com/swagger-api/swagger-ui
+- Vendored version: 5.32.8
+- License: Apache-2.0
+
+The browser bundle and stylesheet are stored in
+`frontend/vendor/swagger-ui/`. The upstream `LICENSE`, `NOTICE`, and bundled
+dependency notices are included in the same directory.
+
+## Chinese license-plate models
 
 The Chinese license-plate detector and recognizer are derived from:
 

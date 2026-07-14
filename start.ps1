@@ -190,7 +190,3 @@ Write-Host "PID:    $serverProcessId"
 Write-Host "stdout: $stdoutLog"
 Write-Host "stderr: $stderrLog"
 Write-Host "Run this script again to restart the service with the latest code."
-
-if (-not $NoBrowser) {
-    Start-Process $baseUrl
-}

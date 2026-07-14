@@ -261,6 +261,17 @@ def test_single_camera_feed_reconnects_for_source_changes(client):
     assert 'videoFeed.addEventListener("error"' in app_js
 
 
+def test_single_monitor_recovers_workspace_owned_pauses(client):
+    app_js = client.get("/static/js/app.js").text
+
+    assert "workspacePause: null" in app_js
+    assert 'await pauseStreamForWorkspace("no-parking")' in app_js
+    assert 'await pauseStreamForWorkspace("road-abnormal")' in app_js
+    assert "resumeWorkspacePause(previousView).catch(reportError)" in app_js
+    assert app_js.count("await resumeCurrentStream();") >= 3
+    assert "state.stream.paused" in app_js
+
+
 def test_frontend_waits_for_rendered_main_frame_and_skips_blocking_previews(client):
     app_js = client.get("/static/js/app.js").text
 
@@ -366,7 +377,8 @@ def test_frontend_shell_prevents_stale_asset_initialization_failure(client):
     app_js = client.get("/static/js/app.js").text
 
     assert index.headers["cache-control"] == "no-store"
-    assert "/static/js/app.js?v=20260713-12" in index.text
+    assert "/static/js/app.js?v=20260714-6" in index.text
+    assert "/static/js/system-management.js?v=20260714-5" in index.text
     assert 'id="road-video-preview"' in index.text
     assert 'id="road-video-preview-status">实时</span>' in index.text
     assert "/api/video/preview?source_id=" in app_js

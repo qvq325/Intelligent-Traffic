@@ -940,7 +940,7 @@ function modelPipelineAdvancedFields(sceneKey, setting) {
     fields.append(
       modelPipelineField(
         "静止位移阈值",
-        modelPipelineNumberInput("parking_move_threshold", setting.parking_move_threshold, { min: 0.001, max: 1, step: 0.005 }),
+        modelPipelineNumberInput("parking_move_threshold", setting.parking_move_threshold, { min: 0.001, max: 1, step: 0.001 }),
       ),
     );
   } else {
@@ -2518,6 +2518,10 @@ function bindEvents() {
     event.preventDefault();
     saveModelPipelines().catch((error) => notify(errorDetail(error), "error"));
   });
+  elements.modelPipelineForm.addEventListener("invalid", (event) => {
+    const details = event.target.closest("details");
+    if (details) details.open = true;
+  }, true);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       stopDevicePolling();

@@ -807,6 +807,95 @@ def test_model_pipeline_get_and_put_api_contracts(tmp_path, monkeypatch):
         assert saved_body["settings"][1]["revision"] == body["settings"][1]["revision"] + 1
 
 
+def test_model_pipeline_put_updates_realtime_runtime_and_processor(tmp_path):
+    model_pipelines = _model_pipeline_module()
+    constructed_options = []
+
+    class RuntimeRegistry(StubRegistry):
+        def resolve(self, setting: dict):
+            return model_pipelines.ModelPipelineOptions(
+                scene_key=setting["scene_key"],
+                preset=setting["preset"],
+                enabled=setting["enabled"],
+                device_preference=setting["device_preference"],
+                yolo_threshold=setting["yolo_threshold"],
+                lpr_threshold=setting["lpr_threshold"],
+                frame_interval=setting["frame_interval"],
+                inference_size=setting["inference_size"],
+                parking_move_threshold=setting["parking_move_threshold"],
+                mog_history=setting["mog_history"],
+                mog_variance_threshold=setting["mog_variance_threshold"],
+                mog_min_area=setting["mog_min_area"],
+                mog_min_duration=setting["mog_min_duration"],
+                mog_max_duration=setting["mog_max_duration"],
+                mog_warmup_frames=setting["mog_warmup_frames"],
+                revision=setting.get("revision", 0),
+                vehicle_model_path=Path("runtime-vehicle.pt"),
+                plate_model_path=None,
+                plate_mode="pose",
+                no_parking_mode="dwell",
+                road_abnormal_mode="mog2",
+            )
+
+    class ProcessorDouble:
+        def __init__(self):
+            self.is_initialized = False
+            self.has_lpr = True
+            self.yolo_threshold = 0.0
+            self.lpr_threshold = 0.0
+
+        def initialize(self):
+            self.is_initialized = True
+            return True
+
+        def process(self, _frame):
+            return []
+
+        def reset_tracking(self):
+            pass
+
+    app = create_app(_app_config(tmp_path), start_video=False)
+    with TestClient(app) as client:
+        runtime = client.app.state.runtime
+        runtime.configuration_service.model_pipeline_registry = RuntimeRegistry()
+        runtime.video._processor_factory = lambda options: (
+            constructed_options.append(options) or ProcessorDouble()
+        )
+        before = client.get("/api/config/model-pipelines").json()
+        settings = _editable(before["settings"])
+        realtime = settings[0]
+        realtime.update(
+            enabled=True,
+            yolo_threshold=0.61,
+            lpr_threshold=0.82,
+            frame_interval=7,
+            inference_size=704,
+        )
+
+        response = client.put(
+            "/api/config/model-pipelines",
+            json={"settings": settings},
+        )
+
+        assert response.status_code == 200
+        saved = response.json()["settings"][0]
+        assert saved["revision"] == before["settings"][0]["revision"] + 1
+        assert saved["yolo_threshold"] == pytest.approx(0.61)
+        assert saved["lpr_threshold"] == pytest.approx(0.82)
+        status = runtime.video.status()["detection"]
+        assert status["desired_revision"] == saved["revision"]
+        assert status["yolo_threshold"] == pytest.approx(0.61)
+        assert status["lpr_threshold"] == pytest.approx(0.82)
+        assert status["interval"] == 7
+
+        runtime.video._ensure_processor()
+
+        assert len(constructed_options) == 1
+        assert constructed_options[0].revision == saved["revision"]
+        assert constructed_options[0].inference_size == 704
+        assert runtime.video.status()["detection"]["active_revision"] == saved["revision"]
+
+
 def test_model_pipeline_put_maps_unavailable_registry_errors(tmp_path):
     app = create_app(_app_config(tmp_path), start_video=False)
     with TestClient(app) as client:

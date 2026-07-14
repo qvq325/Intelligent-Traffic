@@ -89,11 +89,6 @@
             </button>
             <input id="video-file-input" type="file" accept="video/*" hidden>
           </div>
-          <label class="switch-field detection-switch">
-            <input id="detection-toggle" type="checkbox">
-            <span class="switch" aria-hidden="true"></span>
-            <span>智能检测</span>
-          </label>
         </div>
 
         <div class="monitor-layout" id="single-monitor-layout">
@@ -129,11 +124,6 @@
           </section>
 
           <aside class="inspector monitor-inspector">
-            <div class="segmented-tabs" role="tablist">
-              <button class="active" data-monitor-tab="results" type="button">检测结果</button>
-              <button data-monitor-tab="settings" type="button">检测参数</button>
-            </div>
-
             <div class="inspector-pane active" id="monitor-results-pane">
               <div class="pane-heading">
                 <h3>当前画面</h3>
@@ -147,29 +137,6 @@
                 <div class="empty-table" id="results-empty">暂无检测结果</div>
               </div>
             </div>
-
-            <form class="inspector-pane settings-form" id="monitor-settings-pane">
-              <div class="pane-heading"><h3>推理配置</h3></div>
-              <label class="field">
-                <span>推理设备</span>
-                <select id="device-select"></select>
-              </label>
-              <label class="field range-field">
-                <span>车辆阈值 <output id="yolo-output">0.50</output></span>
-                <input id="yolo-threshold" type="range" min="0.05" max="1" step="0.05" value="0.5">
-              </label>
-              <label class="field range-field">
-                <span>车牌阈值 <output id="lpr-output">0.70</output></span>
-                <input id="lpr-threshold" type="range" min="0.05" max="1" step="0.05" value="0.7">
-              </label>
-              <label class="field">
-                <span>检测间隔</span>
-                <div class="number-unit"><input id="detect-interval" type="number" min="1" max="60" value="5"><span>帧</span></div>
-              </label>
-              <button class="command-button primary" type="submit">
-                <i data-lucide="save"></i><span>应用参数</span>
-              </button>
-            </form>
           </aside>
         </div>
 
@@ -984,7 +951,7 @@
   </dialog>
 
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script type="module" src="/static/js/app.js?v=20260713-12"></script>
-  <script type="module" src="/static/js/system-management.js?v=20260714-4"></script>
+  <script type="module" src="/static/js/app.js?v=20260714-6"></script>
+  <script type="module" src="/static/js/system-management.js?v=20260714-5"></script>
 </body>
 </html>

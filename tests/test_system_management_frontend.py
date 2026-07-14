@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+APP_SCRIPT = (ROOT / "frontend" / "js" / "app.js").read_text(encoding="utf-8")
 SCRIPT = (ROOT / "frontend" / "js" / "system-management.js").read_text(
     encoding="utf-8"
 )
@@ -80,3 +81,36 @@ def test_model_management_never_exposes_weight_paths_or_password_controls():
     assert "yolo26x.pt" not in combined
     assert 'name="model_path"' not in combined
     assert 'name="password"' not in combined
+
+
+def test_realtime_monitor_has_no_duplicate_model_configuration_editor():
+    assert 'data-monitor-tab="settings"' not in INDEX
+    assert 'id="monitor-settings-pane"' not in INDEX
+    assert 'id="device-select"' not in INDEX
+    assert 'id="yolo-threshold"' not in INDEX
+    assert 'id="lpr-threshold"' not in INDEX
+    assert 'id="detect-interval"' not in INDEX
+    assert 'id="detection-toggle"' not in INDEX
+
+    for stale_binding in (
+        "detectionToggle:",
+        "settingsForm:",
+        "deviceSelect:",
+        "yoloThreshold:",
+        "lprThreshold:",
+        "detectInterval:",
+        "settingsDirty:",
+        "function updateRangeOutputs()",
+        "function saveDetectionSettings(",
+    ):
+        assert stale_binding not in APP_SCRIPT
+
+
+def test_model_pipeline_form_accepts_defaults_and_reveals_invalid_advanced_fields():
+    assert (
+        'modelPipelineNumberInput("parking_move_threshold", '
+        'setting.parking_move_threshold, { min: 0.001, max: 1, step: 0.001 })'
+        in SCRIPT
+    )
+    assert 'elements.modelPipelineForm.addEventListener("invalid"' in SCRIPT
+    assert "details.open = true;" in SCRIPT

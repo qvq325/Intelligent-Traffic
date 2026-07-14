@@ -32,7 +32,6 @@ const elements = {
   metricPlates: $("#metric-plates"),
   metricWhitelisted: $("#metric-whitelisted"),
   detectionStatus: $("#detection-status"),
-  detectionToggle: $("#detection-toggle"),
   singleMonitorLayout: $("#single-monitor-layout"),
   multiCameraWorkspace: $("#multi-camera-workspace"),
   multiCameraGrid: $("#multi-camera-grid"),
@@ -42,13 +41,6 @@ const elements = {
   resultsBody: $("#results-body"),
   resultsEmpty: $("#results-empty"),
   resultCount: $("#result-count"),
-  settingsForm: $("#monitor-settings-pane"),
-  deviceSelect: $("#device-select"),
-  yoloThreshold: $("#yolo-threshold"),
-  yoloOutput: $("#yolo-output"),
-  lprThreshold: $("#lpr-threshold"),
-  lprOutput: $("#lpr-output"),
-  detectInterval: $("#detect-interval"),
 
   noParkingSummary: $("#no-parking-summary"),
   noParkingStatusDot: $("#no-parking-status-dot"),
@@ -220,13 +212,13 @@ const state = {
   creatingRoad: false,
   roadDraftPoints: null,
   roadDraftGeometry: "polyline",
-  settingsDirty: false,
   apiOnline: false,
   lastMapImage: "",
   monitorMode: "single",
   multiCameraSources: [],
   multiCameraPage: 0,
   singleModeSnapshot: null,
+  workspacePause: null,
   modeTransitioning: false,
   sourceSwitchToken: 0,
   noParkingCatalog: [],
@@ -394,6 +386,67 @@ function setApiOnline(online) {
   }
 }
 
+async function pauseStreamForWorkspace(owner) {
+  const sourceId = state.stream?.active_source?.id;
+  if (!sourceId) return state.stream;
+  const wasPaused = Boolean(state.stream.paused);
+  const stream = await api.pauseStream(true);
+  renderStream(stream);
+  if (!wasPaused && stream.paused && stream.active_source?.id === sourceId) {
+    state.workspacePause = { owner, sourceId };
+  }
+  return stream;
+}
+
+async function resumeCurrentStream() {
+  const sourceId = state.stream?.active_source?.id;
+  if (!sourceId || !state.stream.paused) return state.stream;
+  const stream = await api.pauseStream(false);
+  if (
+    state.stream?.active_source?.id === sourceId
+    && stream.active_source?.id === sourceId
+  ) {
+    state.workspacePause = null;
+    renderStream(stream);
+    ensureVideoFeed(true);
+  }
+  return stream;
+}
+
+async function resumeWorkspacePause(owner) {
+  const pause = state.workspacePause;
+  if (!pause || pause.owner !== owner) return;
+  if (
+    state.stream?.active_source?.id !== pause.sourceId
+    || !state.stream.paused
+  ) {
+    state.workspacePause = null;
+    return;
+  }
+
+  state.workspacePause = null;
+  try {
+    const stream = await api.pauseStream(false);
+    if (
+      state.stream?.active_source?.id === pause.sourceId
+      && stream.active_source?.id === pause.sourceId
+    ) {
+      renderStream(stream);
+      if (state.activeView === "monitor" && state.monitorMode === "single") {
+        ensureVideoFeed(true);
+      }
+    }
+  } catch (error) {
+    if (
+      state.stream?.active_source?.id === pause.sourceId
+      && state.stream.paused
+    ) {
+      state.workspacePause = pause;
+    }
+    throw error;
+  }
+}
+
 function switchView(viewName) {
   const previousView = state.activeView;
   state.activeView = viewName;
@@ -404,7 +457,9 @@ function switchView(viewName) {
     view.classList.toggle("active", view.id === `view-${viewName}`);
   });
   $(".main-content").scrollTop = 0;
-  if (viewName === "map") {
+  if (viewName === "monitor" && state.monitorMode === "single") {
+    ensureVideoFeed(true);
+  } else if (viewName === "map") {
     mapCanvas.resize();
     loadMap({ syncEditors: false }).catch(reportError);
   } else if (viewName === "no-parking") {
@@ -422,14 +477,9 @@ function switchView(viewName) {
   if (previousView === "road-abnormal" && viewName !== "road-abnormal") {
     stopRoadAbnormalFeed();
   }
-}
-
-function activateMonitorTab(tabName) {
-  $$('[data-monitor-tab]').forEach((button) => {
-    button.classList.toggle("active", button.dataset.monitorTab === tabName);
-  });
-  $("#monitor-results-pane").classList.toggle("active", tabName === "results");
-  elements.settingsForm.classList.toggle("active", tabName === "settings");
+  if (previousView !== viewName) {
+    resumeWorkspacePause(previousView).catch(reportError);
+  }
 }
 
 function activateMapTab(tabName) {
@@ -480,9 +530,6 @@ function populateSystem(system) {
     elements.roadAbnormalSourceSelect.value = currentRoadAbnormalSource;
   }
 
-  elements.deviceSelect.replaceChildren(
-    ...system.devices.map((device) => option(device.id, device.name)),
-  );
   state.multiCameraSources = [...system.sources];
   const lastPage = Math.max(0, Math.ceil(system.sources.length / MULTI_CAMERA_PAGE_SIZE) - 1);
   state.multiCameraPage = Math.min(state.multiCameraPage, lastPage);
@@ -643,7 +690,13 @@ function changeMultiCameraPage(offset) {
 async function setMonitorMode(mode, { sourceId = "" } = {}) {
   const isMulti = mode === "multi";
   const nextMode = isMulti ? "multi" : "single";
-  if (state.modeTransitioning || state.monitorMode === nextMode) return;
+  if (state.modeTransitioning) return;
+  const recoveringSingleMode = (
+    state.monitorMode === nextMode
+    && nextMode === "single"
+    && Boolean(state.stream?.paused)
+  );
+  if (state.monitorMode === nextMode && !recoveringSingleMode) return;
 
   state.modeTransitioning = true;
   $$('[data-monitor-mode]').forEach((button) => { button.disabled = true; });
@@ -666,7 +719,9 @@ async function setMonitorMode(mode, { sourceId = "" } = {}) {
   });
 
   try {
-    if (isMulti) {
+    if (recoveringSingleMode) {
+      await resumeCurrentStream();
+    } else if (isMulti) {
       cancelSourceSwitchPreview();
       elements.videoFeed.removeAttribute("src");
       elements.videoFeed.dataset.active = "true";
@@ -787,15 +842,7 @@ function renderStream(stream, { syncSettings = false } = {}) {
   elements.metricPlates.textContent = stream.metrics.plates;
   elements.metricWhitelisted.textContent = stream.metrics.whitelisted;
   elements.detectionStatus.textContent = stream.detection.status;
-  elements.detectionToggle.checked = stream.detection.enabled;
 
-  if (syncSettings || !state.settingsDirty) {
-    elements.deviceSelect.value = stream.detection.device;
-    elements.yoloThreshold.value = stream.detection.yolo_threshold;
-    elements.lprThreshold.value = stream.detection.lpr_threshold;
-    elements.detectInterval.value = stream.detection.interval;
-    updateRangeOutputs();
-  }
   renderResults(stream.results);
 }
 
@@ -818,11 +865,6 @@ function renderResults(results) {
     row.append(statusCell);
     elements.resultsBody.append(row);
   }
-}
-
-function updateRangeOutputs() {
-  elements.yoloOutput.value = Number(elements.yoloThreshold.value).toFixed(2);
-  elements.lprOutput.value = Number(elements.lprThreshold.value).toFixed(2);
 }
 
 function clearSourceSwitchPreview(token = state.sourceSwitchToken) {
@@ -889,7 +931,11 @@ async function playSelectedSource() {
     state.stream?.active_source?.id === sourceId
     && state.stream.connected
   ) {
-    ensureVideoFeed();
+    if (state.stream.paused) {
+      await resumeCurrentStream();
+    } else {
+      ensureVideoFeed();
+    }
     return;
   }
   const switchToken = beginSourceSwitchPreview(sourceId);
@@ -910,7 +956,12 @@ async function playSelectedSource() {
 
 async function togglePause() {
   if (!state.stream?.active_source) return;
-  renderStream(await api.pauseStream(!state.stream.paused));
+  if (state.stream.paused) {
+    await resumeCurrentStream();
+    return;
+  }
+  state.workspacePause = null;
+  renderStream(await api.pauseStream(true));
 }
 
 async function stopStream() {
@@ -927,19 +978,6 @@ async function uploadVideo(file) {
   renderStream(response.stream, { syncSettings: true });
   ensureVideoFeed(true);
   showToast("本地视频已加载", "success");
-}
-
-async function saveDetectionSettings(event) {
-  event.preventDefault();
-  const settings = {
-    device: elements.deviceSelect.value,
-    yolo_threshold: Number(elements.yoloThreshold.value),
-    lpr_threshold: Number(elements.lprThreshold.value),
-    interval: Number(elements.detectInterval.value),
-  };
-  await api.updateDetection(settings);
-  state.settingsDirty = false;
-  showToast("检测参数已应用", "success");
 }
 
 function currentNoParkingScene() {
@@ -1439,7 +1477,7 @@ async function captureNoParkingReference() {
   state.noParkingBusy = true;
   renderNoParkingControls();
   try {
-    renderStream(await api.pauseStream(true));
+    await pauseStreamForWorkspace("no-parking");
     const reference = await api.captureNoParkingReference(cameraId);
     state.noParkingPoints = [];
     noParkingCanvas.setPoints([]);
@@ -1853,7 +1891,7 @@ async function captureRoadAbnormalReference() {
       && !elements.roadAbnormalReference.hidden,
     );
     if (!referenceReady) {
-      renderStream(await api.pauseStream(true));
+      await pauseStreamForWorkspace("road-abnormal");
       const reference = await api.captureRoadAbnormalReference(cameraId);
       state.roadAbnormalPoints = [];
       roadAbnormalCanvas.setPoints([]);
@@ -2620,9 +2658,6 @@ function bindEvents() {
   $$(".nav-button[data-view]").forEach((button) => {
     button.addEventListener("click", () => switchView(button.dataset.view));
   });
-  $$('[data-monitor-tab]').forEach((button) => {
-    button.addEventListener("click", () => activateMonitorTab(button.dataset.monitorTab));
-  });
   $$('[data-monitor-mode]').forEach((button) => {
     button.addEventListener("click", () => setMonitorMode(button.dataset.monitorMode).catch(reportError));
   });
@@ -2776,25 +2811,6 @@ function bindEvents() {
     link.href = "/api/video/snapshot";
     link.click();
   });
-  elements.detectionToggle.addEventListener("change", async () => {
-    try {
-      await api.updateDetection({ enabled: elements.detectionToggle.checked });
-    } catch (error) {
-      elements.detectionToggle.checked = !elements.detectionToggle.checked;
-      reportError(error);
-    }
-  });
-  elements.settingsForm.addEventListener("submit", (event) => saveDetectionSettings(event).catch(reportError));
-  [elements.yoloThreshold, elements.lprThreshold].forEach((input) => {
-    input.addEventListener("input", () => {
-      state.settingsDirty = true;
-      updateRangeOutputs();
-    });
-  });
-  [elements.deviceSelect, elements.detectInterval].forEach((input) => {
-    input.addEventListener("change", () => { state.settingsDirty = true; });
-  });
-
   elements.whitelistForm.addEventListener("submit", (event) => saveWhitelistEntry(event).catch(reportError));
   elements.whitelistToggle.addEventListener("change", async () => {
     try {
@@ -2939,7 +2955,6 @@ async function initialize() {
   bindEvents();
   refreshIcons();
   startClock();
-  updateRangeOutputs();
 
   try {
     const [system, stream, whitelist, map] = await Promise.all([

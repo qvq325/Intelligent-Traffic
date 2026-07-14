@@ -76,6 +76,9 @@ ehthumbs.db
 /nul
 /.gitnexus/
 
+# Model weights are distributed outside Git
+*.pt
+
 # Local test videos and captured media
 /videos/
 *.mp4

@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 APP_SCRIPT = (ROOT / "frontend" / "js" / "app.js").read_text(encoding="utf-8")
+API_SCRIPT = (ROOT / "frontend" / "js" / "api.js").read_text(encoding="utf-8")
 SCRIPT = (ROOT / "frontend" / "js" / "system-management.js").read_text(
     encoding="utf-8"
 )
@@ -114,3 +115,26 @@ def test_model_pipeline_form_accepts_defaults_and_reveals_invalid_advanced_field
     )
     assert 'elements.modelPipelineForm.addEventListener("invalid"' in SCRIPT
     assert "details.open = true;" in SCRIPT
+
+
+def test_no_parking_scene_management_uses_global_camera_semantics():
+    assert 'const topologyBound = sceneType === "road_abnormal";' in SCRIPT
+    assert 'const relationshipText = topologyBound' in SCRIPT
+    assert ': "全局摄像头";' in SCRIPT
+    assert 'statusCell("ready", "无需拓扑复核")' in SCRIPT
+    assert (
+        'sceneType !== "no_parking" && reviewStatus === "needs_review"'
+        in SCRIPT
+    )
+    assert 'if (scene.scene_type === "road_abnormal") {' in SCRIPT
+    assert 'details.push(`拓扑：' in SCRIPT
+    assert "<th>关联范围</th>" in INDEX
+    assert "<th>拓扑与修订</th>" not in INDEX
+
+
+def test_api_client_displays_structured_configuration_errors_first():
+    structured = 'typeof payload.error?.message === "string"'
+    detail = 'typeof payload.detail === "string"'
+    assert structured in API_SCRIPT
+    assert detail in API_SCRIPT
+    assert API_SCRIPT.index(structured) < API_SCRIPT.index(detail)

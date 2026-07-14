@@ -761,18 +761,25 @@ function renderScenes() {
       : activation.road_abnormal_scene_id;
     const active = Boolean(scene.is_active || scene.active || sceneId === activeId);
     const reviewStatus = scene.review_status || "ready";
+    const topologyBound = sceneType === "road_abnormal";
+    const relationshipText = topologyBound
+      ? `${scene.topology_name || scene.topology_id || "--"} · r${scene.topology_revision || "--"}`
+      : "全局摄像头";
+    const reviewCell = topologyBound
+      ? statusCell(reviewStatus)
+      : statusCell("ready", "无需拓扑复核");
     const row = document.createElement("tr");
     if (active) row.classList.add("selected");
     row.append(
       identityCell(scene.name, sceneId),
       textCell(SCENE_TYPE_LABELS[sceneType] || sceneType || "--"),
       textCell(scene.camera_name || scene.camera_id || "--"),
-      textCell(`${scene.topology_name || scene.topology_id || "--"} · r${scene.topology_revision || "--"}`),
-      statusCell(reviewStatus),
+      textCell(relationshipText),
+      reviewCell,
       statusCell(active ? "active" : "offline", active ? "已激活" : "未激活"),
       actionCell(
         actionButton({ action: "edit-scene", id: sceneId, type: sceneType, icon: "square-pen", title: "进入场景编辑器" }),
-        actionButton({ action: "activate-scene", id: sceneId, type: sceneType, icon: "power", title: "激活场景", disabled: active || reviewStatus === "needs_review" }),
+        actionButton({ action: "activate-scene", id: sceneId, type: sceneType, icon: "power", title: "激活场景", disabled: active || (sceneType !== "no_parking" && reviewStatus === "needs_review") }),
         actionButton({ action: "deactivate-scene", id: sceneId, type: sceneType, icon: "circle-stop", title: "停用此类场景", danger: true, disabled: !active }),
       ),
     );
@@ -2203,10 +2210,14 @@ function openTopology(topology) {
 }
 
 async function activateScene(scene) {
+  const details = [`摄像头：${scene.camera_name || scene.camera_id || "--"}`];
+  if (scene.scene_type === "road_abnormal") {
+    details.push(`拓扑：${scene.topology_name || scene.topology_id || "--"} · r${scene.topology_revision || "--"}`);
+  }
   const ok = await confirmAction({
     title: `激活${SCENE_TYPE_LABELS[scene.scene_type] || ""}场景`,
     message: `确定激活“${scene.name}”？同类型当前运行场景将被替换。`,
-    details: [`摄像头：${scene.camera_name || scene.camera_id || "--"}`, `拓扑：${scene.topology_name || scene.topology_id || "--"} · r${scene.topology_revision || "--"}`],
+    details,
     confirmLabel: "激活场景",
   });
   if (!ok) return;

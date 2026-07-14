@@ -10,7 +10,9 @@ async function request(path, options = {}) {
     let message = `请求失败 (${response.status})`;
     try {
       const payload = await response.json();
-      if (typeof payload.detail === "string") {
+      if (typeof payload.error?.message === "string") {
+        message = payload.error.message;
+      } else if (typeof payload.detail === "string") {
         message = payload.detail;
       } else if (Array.isArray(payload.detail) && payload.detail[0]?.msg) {
         message = payload.detail[0].msg;

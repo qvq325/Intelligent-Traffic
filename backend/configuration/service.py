@@ -911,7 +911,13 @@ class ConfigurationService:
                 if not creating:
                     self.repository.execute(
                         connection,
-                        "UPDATE scene_archive SET review_status = 'needs_review', updated_at = ? WHERE topology_id = ? AND topology_revision < ?",
+                        """
+                        UPDATE scene_archive
+                        SET review_status = 'needs_review', updated_at = ?
+                        WHERE scene_type = 'road_abnormal'
+                          AND topology_id = ?
+                          AND topology_revision < ?
+                        """,
                         (_now(), topology_id, revision),
                     )
                     state = self.repository.fetch_one("SELECT * FROM activation_state WHERE singleton_id = 1", connection=connection)
@@ -919,8 +925,10 @@ class ConfigurationService:
                         self.repository.execute(
                             connection,
                             """
-                            UPDATE activation_state SET topology_revision = ?, no_parking_scene_id = NULL,
-                                road_abnormal_scene_id = NULL, updated_at = ? WHERE singleton_id = 1
+                            UPDATE activation_state
+                            SET topology_revision = ?, road_abnormal_scene_id = NULL,
+                                updated_at = ?
+                            WHERE singleton_id = 1
                             """,
                             (revision, _now()),
                         )
@@ -962,7 +970,17 @@ class ConfigurationService:
             raise ConfigurationError("BUILTIN_TOPOLOGY_PROTECTED", "内置拓扑不可删除", status_code=409)
         if topology["is_active"]:
             raise ConfigurationError("ACTIVE_TOPOLOGY_PROTECTED", "当前激活拓扑不可删除", status_code=409)
-        scenes = [dict(item) for item in self.repository.fetch_all("SELECT scene_id, name FROM scene_archive WHERE topology_id = ?", (topology_id,))]
+        scenes = [
+            dict(item)
+            for item in self.repository.fetch_all(
+                """
+                SELECT scene_id, name
+                FROM scene_archive
+                WHERE scene_type = 'road_abnormal' AND topology_id = ?
+                """,
+                (topology_id,),
+            )
+        ]
         if scenes:
             raise ConfigurationError("TOPOLOGY_IN_USE", "拓扑仍被场景引用", status_code=409, details=scenes)
         with self.repository.transaction() as connection:
@@ -1020,6 +1038,28 @@ class ConfigurationService:
         return payload
 
     def upsert_scene_archive(self, values: dict) -> dict:
+        values = dict(values)
+        scene_type = values.get("scene_type")
+        camera_id = values.get("camera_id")
+        camera = self.repository.fetch_one(
+            "SELECT camera_id FROM camera WHERE camera_id = ?",
+            (camera_id,),
+        )
+        if camera is None:
+            raise ConfigurationError(
+                "SCENE_CAMERA_INVALID",
+                "场景摄像头不在固定全局摄像头目录中",
+                details=[{"camera_id": camera_id}],
+            )
+        if scene_type == "no_parking":
+            values["topology_id"] = None
+            values["topology_revision"] = None
+        elif not values.get("topology_id") or values.get("topology_revision") is None:
+            raise ConfigurationError(
+                "SCENE_TOPOLOGY_REQUIRED",
+                "道路异常场景必须绑定道路拓扑",
+            )
+
         scene_id = values.get("scene_id") or f"scene_{uuid4().hex}"
         exists = self._scene_exists(scene_id)
         try:

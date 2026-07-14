@@ -261,8 +261,11 @@ def test_migrates_complete_legacy_snapshot_without_changing_source_files(tmp_pat
 
     scenes = repository.fetch_all("SELECT * FROM scene_archive ORDER BY scene_type")
     assert len(scenes) == 2
-    assert all(row["topology_id"] == BUILTIN_TOPOLOGY_ID for row in scenes)
-    assert all(row["topology_revision"] == 1 for row in scenes)
+    scenes_by_type = {row["scene_type"]: row for row in scenes}
+    assert scenes_by_type["no_parking"]["topology_id"] is None
+    assert scenes_by_type["no_parking"]["topology_revision"] is None
+    assert scenes_by_type["road_abnormal"]["topology_id"] == BUILTIN_TOPOLOGY_ID
+    assert scenes_by_type["road_abnormal"]["topology_revision"] == 1
     assert all(row["review_status"] == "ready" for row in scenes)
     no_parking_config = json.loads(scenes[0]["validated_config_json"])
     assert set(no_parking_config) == {"zones"}

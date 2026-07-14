@@ -724,13 +724,17 @@ class ApplicationState:
             "scene_id", "name", "camera_id", "reference_image", "reference_url",
             "reference_width", "reference_height", "created_at", "updated_at",
         }
+        topology_id = state["topology_id"] if scene_type == "road_abnormal" else None
+        topology_revision = (
+            state["topology_revision"] if scene_type == "road_abnormal" else None
+        )
         return self.configuration_service.upsert_scene_archive(
             {
                 "scene_id": scene["scene_id"],
                 "scene_type": scene_type,
                 "name": scene["name"],
-                "topology_id": state["topology_id"],
-                "topology_revision": state["topology_revision"],
+                "topology_id": topology_id,
+                "topology_revision": topology_revision,
                 "camera_id": scene["camera_id"],
                 "reference_asset_id": reference_asset_id,
                 "config": {key: value for key, value in scene.items() if key not in excluded},

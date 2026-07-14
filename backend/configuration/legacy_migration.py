@@ -716,14 +716,19 @@ class LegacyMigrator:
                 scene_id, scene_type, name, topology_id, topology_revision,
                 camera_id, reference_asset_id, validated_config_json,
                 review_status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, 'ready', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)
             """,
             [
                 (
                     scene.scene_id,
                     scene.scene_type,
                     scene.name,
-                    BUILTIN_TOPOLOGY_ID,
+                    (
+                        None
+                        if scene.scene_type == "no_parking"
+                        else BUILTIN_TOPOLOGY_ID
+                    ),
+                    None if scene.scene_type == "no_parking" else 1,
                     scene.camera_id,
                     (
                         scene_assets[scene.reference_path.resolve()]["asset_id"]

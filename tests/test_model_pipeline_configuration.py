@@ -113,7 +113,7 @@ def _install_legacy_metadata_version(
 def test_new_repository_seeds_exactly_four_legacy_model_pipeline_rows(tmp_path):
     repository = _repository(tmp_path)
 
-    assert SCHEMA_VERSION == 2
+    assert repository.fetch_one("PRAGMA user_version")[0] == SCHEMA_VERSION
     rows = repository.fetch_all(
         "SELECT * FROM model_pipeline_setting ORDER BY scene_key"
     )
@@ -219,10 +219,10 @@ def test_version_1_repository_migrates_without_losing_rows(tmp_path):
     assert repository.fetch_one(
         "SELECT stream_id FROM stream_source WHERE stream_id = 'kept-stream'"
     )[0] == "kept-stream"
-    assert repository.fetch_one("PRAGMA user_version")[0] == 2
+    assert repository.fetch_one("PRAGMA user_version")[0] == SCHEMA_VERSION
     assert repository.fetch_one(
         "SELECT schema_version FROM schema_metadata WHERE singleton_id = 1"
-    )[0] == 2
+    )[0] == SCHEMA_VERSION
     rows = repository.fetch_all("SELECT * FROM model_pipeline_setting")
     assert len(rows) == 4
     for row in rows:
@@ -268,12 +268,14 @@ def test_version_1_migration_rolls_back_invalid_v2_seed(tmp_path):
 
 def test_repository_rejects_future_schema_before_applying_changes(tmp_path):
     repository = _repository(tmp_path)
+    future_version = SCHEMA_VERSION + 1
     with repository.transaction() as connection:
         connection.execute("DROP TABLE IF EXISTS model_pipeline_setting")
         connection.execute(
-            "UPDATE schema_metadata SET schema_version = 3 WHERE singleton_id = 1"
+            "UPDATE schema_metadata SET schema_version = ? WHERE singleton_id = 1",
+            (future_version,),
         )
-        connection.execute("PRAGMA user_version = 3")
+        connection.execute(f"PRAGMA user_version = {future_version}")
 
     with pytest.raises(SchemaVersionError, match="schema version"):
         repository.initialize(_catalog())
@@ -304,7 +306,7 @@ def test_new_schema_metadata_rejects_non_integer_versions(
 
     assert repository.fetch_one(
         "SELECT schema_version FROM schema_metadata WHERE singleton_id = 1"
-    )[0] == 2
+    )[0] == SCHEMA_VERSION
 
 
 @pytest.mark.parametrize(

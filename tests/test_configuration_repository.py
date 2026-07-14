@@ -31,6 +31,238 @@ def _repository(tmp_path):
     return repository
 
 
+def _create_v2_database(tmp_path):
+    database_path = tmp_path / "runtime" / "config" / "config.sqlite3"
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog = _catalog()
+
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            PRAGMA foreign_keys = ON;
+
+            CREATE TABLE camera (
+                camera_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
+                ordinal INTEGER NOT NULL UNIQUE CHECK (ordinal >= 1),
+                builtin_fingerprint TEXT NOT NULL UNIQUE
+                    CHECK (length(builtin_fingerprint) = 64)
+            );
+
+            CREATE TABLE stream_binding_profile (
+                profile_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
+                description TEXT NOT NULL DEFAULT '',
+                is_builtin INTEGER NOT NULL DEFAULT 0 CHECK (is_builtin IN (0, 1)),
+                created_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+
+            CREATE TABLE asset (
+                asset_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL CHECK (kind IN ('map', 'scene_reference')),
+                relative_path TEXT NOT NULL UNIQUE
+                    CHECK (length(trim(relative_path)) > 0),
+                sha256 TEXT NOT NULL
+                    CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+                size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+                media_type TEXT NOT NULL CHECK (
+                    media_type IN ('image/png', 'image/jpeg', 'image/webp', 'image/bmp')
+                ),
+                width INTEGER NOT NULL CHECK (width BETWEEN 1 AND 10000),
+                height INTEGER NOT NULL CHECK (height BETWEEN 1 AND 10000),
+                created_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                UNIQUE (kind, sha256)
+            );
+
+            CREATE TABLE topology_profile (
+                topology_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
+                revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+                map_asset_id TEXT NOT NULL,
+                map_width INTEGER NOT NULL CHECK (map_width BETWEEN 1 AND 10000),
+                map_height INTEGER NOT NULL CHECK (map_height BETWEEN 1 AND 10000),
+                is_builtin INTEGER NOT NULL DEFAULT 0 CHECK (is_builtin IN (0, 1)),
+                created_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                FOREIGN KEY (map_asset_id) REFERENCES asset(asset_id)
+                    ON UPDATE CASCADE ON DELETE RESTRICT
+            );
+
+            CREATE TABLE scene_archive (
+                scene_id TEXT PRIMARY KEY,
+                scene_type TEXT NOT NULL
+                    CHECK (scene_type IN ('no_parking', 'road_abnormal')),
+                name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+                topology_id TEXT NOT NULL,
+                topology_revision INTEGER NOT NULL CHECK (topology_revision >= 1),
+                camera_id TEXT NOT NULL,
+                reference_asset_id TEXT,
+                validated_config_json TEXT NOT NULL
+                    CHECK (json_valid(validated_config_json)),
+                review_status TEXT NOT NULL DEFAULT 'ready'
+                    CHECK (review_status IN ('ready', 'needs_review')),
+                created_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                FOREIGN KEY (topology_id) REFERENCES topology_profile(topology_id)
+                    ON UPDATE CASCADE ON DELETE RESTRICT,
+                FOREIGN KEY (camera_id) REFERENCES camera(camera_id)
+                    ON UPDATE CASCADE ON DELETE RESTRICT,
+                FOREIGN KEY (reference_asset_id) REFERENCES asset(asset_id)
+                    ON UPDATE CASCADE ON DELETE RESTRICT
+            );
+
+            CREATE TABLE detection_settings (
+                singleton_id INTEGER PRIMARY KEY DEFAULT 1 CHECK (singleton_id = 1),
+                enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+                yolo_threshold REAL NOT NULL DEFAULT 0.5
+                    CHECK (yolo_threshold BETWEEN 0.05 AND 1.0),
+                lpr_threshold REAL NOT NULL DEFAULT 0.7
+                    CHECK (lpr_threshold BETWEEN 0.05 AND 1.0),
+                frame_interval INTEGER NOT NULL DEFAULT 5
+                    CHECK (frame_interval BETWEEN 1 AND 60),
+                device_preference TEXT NOT NULL DEFAULT 'cpu'
+                    CHECK (length(trim(device_preference)) > 0),
+                updated_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+
+            CREATE TABLE activation_state (
+                singleton_id INTEGER PRIMARY KEY DEFAULT 1 CHECK (singleton_id = 1),
+                stream_profile_id TEXT NOT NULL,
+                topology_id TEXT NOT NULL,
+                topology_revision INTEGER NOT NULL CHECK (topology_revision >= 1),
+                no_parking_scene_id TEXT,
+                road_abnormal_scene_id TEXT,
+                updated_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                FOREIGN KEY (stream_profile_id)
+                    REFERENCES stream_binding_profile(profile_id)
+                    ON UPDATE CASCADE ON DELETE RESTRICT,
+                FOREIGN KEY (topology_id) REFERENCES topology_profile(topology_id)
+                    ON UPDATE CASCADE ON DELETE RESTRICT,
+                FOREIGN KEY (no_parking_scene_id) REFERENCES scene_archive(scene_id)
+                    ON UPDATE CASCADE ON DELETE RESTRICT,
+                FOREIGN KEY (road_abnormal_scene_id) REFERENCES scene_archive(scene_id)
+                    ON UPDATE CASCADE ON DELETE RESTRICT
+            );
+
+            CREATE TABLE schema_metadata (
+                singleton_id INTEGER PRIMARY KEY DEFAULT 1 CHECK (singleton_id = 1),
+                schema_version INTEGER NOT NULL CHECK (
+                    typeof(schema_version) = 'integer' AND schema_version >= 1
+                ),
+                legacy_migration_completed INTEGER NOT NULL DEFAULT 0
+                    CHECK (legacy_migration_completed IN (0, 1)),
+                builtin_baseline_version TEXT NOT NULL
+                    CHECK (length(trim(builtin_baseline_version)) > 0),
+                camera_catalog_fingerprint TEXT NOT NULL
+                    CHECK (length(camera_catalog_fingerprint) = 64),
+                created_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO camera (
+                camera_id, display_name, ordinal, builtin_fingerprint
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [
+                (
+                    entry.camera_id,
+                    entry.display_name,
+                    entry.ordinal,
+                    entry.builtin_fingerprint,
+                )
+                for entry in catalog
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO stream_binding_profile (
+                profile_id, name, description, is_builtin
+            ) VALUES ('profile-1', '默认流方案', '', 1)
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO asset (
+                asset_id, kind, relative_path, sha256,
+                size_bytes, media_type, width, height
+            ) VALUES (
+                'map-asset', 'map', 'assets/maps/map.png', ?,
+                128, 'image/png', 1105, 740
+            )
+            """,
+            ("a" * 64,),
+        )
+        connection.execute(
+            """
+            INSERT INTO topology_profile (
+                topology_id, name, revision, map_asset_id, map_width, map_height
+            ) VALUES ('topology-1', '默认拓扑', 1, 'map-asset', 1105, 740)
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO scene_archive (
+                scene_id, scene_type, name, topology_id, topology_revision,
+                camera_id, validated_config_json, review_status
+            ) VALUES (?, ?, ?, 'topology-1', 1, ?, '{"zones":[]}', ?)
+            """,
+            [
+                (
+                    "legacy-no-parking",
+                    "no_parking",
+                    "旧禁停场景",
+                    "camera-b",
+                    "needs_review",
+                ),
+                (
+                    "legacy-road-abnormal",
+                    "road_abnormal",
+                    "旧道路异常场景",
+                    "camera-a",
+                    "needs_review",
+                ),
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO activation_state (
+                singleton_id, stream_profile_id, topology_id, topology_revision,
+                no_parking_scene_id, road_abnormal_scene_id
+            ) VALUES (
+                1, 'profile-1', 'topology-1', 1,
+                'legacy-no-parking', 'legacy-road-abnormal'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_metadata (
+                singleton_id, schema_version, legacy_migration_completed,
+                builtin_baseline_version, camera_catalog_fingerprint
+            ) VALUES (1, 2, 1, 'test-v2', ?)
+            """,
+            (catalog.fingerprint,),
+        )
+        connection.execute("PRAGMA user_version = 2")
+
+    return database_path
+
+
 def test_camera_catalog_preserves_mapping_order_and_has_stable_fingerprint():
     catalog = _catalog()
 
@@ -240,7 +472,7 @@ def test_core_relations_enforce_graph_scene_and_stream_constraints(tmp_path):
                 scene_id, scene_type, name, topology_id, topology_revision,
                 camera_id, reference_asset_id, validated_config_json
             ) VALUES (
-                'scene-1', 'no_parking', '禁停场景', 'topology-1', 1,
+                'scene-1', 'no_parking', '禁停场景', NULL, NULL,
                 'camera-b', 'scene-asset', '{"zones":[]}'
             )
             """,
@@ -257,6 +489,21 @@ def test_core_relations_enforce_graph_scene_and_stream_constraints(tmp_path):
 
     assert repository.fetch_one("SELECT scene_id FROM scene_archive")[0] == "scene-1"
     assert repository.fetch_one("SELECT topology_id FROM activation_state")[0] == "topology-1"
+
+    with pytest.raises(sqlite3.IntegrityError):
+        with repository.transaction() as connection:
+            repository.execute(
+                connection,
+                """
+                INSERT INTO scene_archive (
+                    scene_id, scene_type, name, topology_id, topology_revision,
+                    camera_id, validated_config_json
+                ) VALUES (
+                    'bad-no-parking', 'no_parking', '错误绑定',
+                    'topology-1', 1, 'camera-b', '{"zones":[]}'
+                )
+                """,
+            )
 
     with pytest.raises(sqlite3.IntegrityError):
         with repository.transaction() as connection:
@@ -332,7 +579,7 @@ def test_topology_revision_can_advance_while_old_scenes_are_retained(tmp_path):
                 scene_id, scene_type, name, topology_id, topology_revision,
                 camera_id, validated_config_json
             ) VALUES (
-                'scene-v1', 'no_parking', '旧修订场景', 'topology-1', 1,
+                'scene-v1', 'road_abnormal', '旧修订场景', 'topology-1', 1,
                 'camera-b', '{"zones":[]}'
             )
             """,
@@ -383,11 +630,50 @@ def test_topology_revision_can_advance_while_old_scenes_are_retained(tmp_path):
                     scene_id, scene_type, name, topology_id, topology_revision,
                     camera_id, validated_config_json
                 ) VALUES (
-                    'bad-scene', 'no_parking', '坏场景', 'topology-1', 1,
+                    'bad-scene', 'no_parking', '坏场景', NULL, NULL,
                     'camera-b', 'not-json'
                 )
                 """,
             )
+
+
+def test_v2_migration_decouples_no_parking_scenes_from_topology(tmp_path):
+    database_path = _create_v2_database(tmp_path)
+    repository = ConfigurationRepository(database_path)
+
+    repository.initialize(_catalog(), builtin_baseline_version="ignored")
+
+    assert repository.fetch_one("PRAGMA user_version")[0] == 3
+    no_parking = repository.fetch_one(
+        """
+        SELECT topology_id, topology_revision, review_status
+        FROM scene_archive
+        WHERE scene_id = 'legacy-no-parking'
+        """
+    )
+    assert tuple(no_parking) == (None, None, "ready")
+
+    road_abnormal = repository.fetch_one(
+        """
+        SELECT topology_id, topology_revision, review_status
+        FROM scene_archive
+        WHERE scene_id = 'legacy-road-abnormal'
+        """
+    )
+    assert tuple(road_abnormal) == ("topology-1", 1, "needs_review")
+
+    activation = repository.fetch_one(
+        """
+        SELECT no_parking_scene_id, road_abnormal_scene_id
+        FROM activation_state
+        WHERE singleton_id = 1
+        """
+    )
+    assert tuple(activation) == (
+        "legacy-no-parking",
+        "legacy-road-abnormal",
+    )
+    assert repository.fetch_all("PRAGMA foreign_key_check") == []
 
 
 def test_integrity_check_and_backup_produce_a_readable_snapshot(tmp_path):

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MODEL_PIPELINE_SCENE_KEYS = (
     "realtime",
@@ -34,6 +34,61 @@ SCHEMA_TABLES = (
 )
 
 _TIMESTAMP_DEFAULT = "(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+
+_SCENE_ARCHIVE_TABLE_BODY = f"""
+    scene_id TEXT PRIMARY KEY,
+    scene_type TEXT NOT NULL CHECK (scene_type IN ('no_parking', 'road_abnormal')),
+    name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    topology_id TEXT,
+    topology_revision INTEGER CHECK (
+        topology_revision IS NULL OR topology_revision >= 1
+    ),
+    camera_id TEXT NOT NULL,
+    reference_asset_id TEXT,
+    validated_config_json TEXT NOT NULL CHECK (json_valid(validated_config_json)),
+    review_status TEXT NOT NULL DEFAULT 'ready'
+        CHECK (review_status IN ('ready', 'needs_review')),
+    created_at TEXT NOT NULL DEFAULT {_TIMESTAMP_DEFAULT},
+    updated_at TEXT NOT NULL DEFAULT {_TIMESTAMP_DEFAULT},
+    CHECK (
+        (
+            scene_type = 'no_parking'
+            AND topology_id IS NULL
+            AND topology_revision IS NULL
+            AND review_status = 'ready'
+        )
+        OR
+        (
+            scene_type = 'road_abnormal'
+            AND topology_id IS NOT NULL
+            AND topology_revision IS NOT NULL
+        )
+    ),
+    FOREIGN KEY (topology_id) REFERENCES topology_profile(topology_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (camera_id) REFERENCES camera(camera_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (reference_asset_id) REFERENCES asset(asset_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+"""
+
+_ACTIVATION_STATE_TABLE_BODY = f"""
+    singleton_id INTEGER PRIMARY KEY DEFAULT 1 CHECK (singleton_id = 1),
+    stream_profile_id TEXT NOT NULL,
+    topology_id TEXT NOT NULL,
+    topology_revision INTEGER NOT NULL CHECK (topology_revision >= 1),
+    no_parking_scene_id TEXT,
+    road_abnormal_scene_id TEXT,
+    updated_at TEXT NOT NULL DEFAULT {_TIMESTAMP_DEFAULT},
+    FOREIGN KEY (stream_profile_id) REFERENCES stream_binding_profile(profile_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (topology_id) REFERENCES topology_profile(topology_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (no_parking_scene_id) REFERENCES scene_archive(scene_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (road_abnormal_scene_id) REFERENCES scene_archive(scene_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+"""
 
 _MODEL_PIPELINE_TABLE_STATEMENT = f"""
 CREATE TABLE IF NOT EXISTS model_pipeline_setting (
@@ -249,26 +304,7 @@ SCHEMA_STATEMENTS = (
     """,
     f"""
     CREATE TABLE IF NOT EXISTS scene_archive (
-        scene_id TEXT PRIMARY KEY,
-        scene_type TEXT NOT NULL CHECK (scene_type IN ('no_parking', 'road_abnormal')),
-        name TEXT NOT NULL CHECK (length(trim(name)) > 0),
-        topology_id TEXT NOT NULL,
-        topology_revision INTEGER NOT NULL CHECK (topology_revision >= 1),
-        camera_id TEXT NOT NULL,
-        reference_asset_id TEXT,
-        validated_config_json TEXT NOT NULL CHECK (json_valid(validated_config_json)),
-        review_status TEXT NOT NULL DEFAULT 'ready'
-            CHECK (review_status IN ('ready', 'needs_review')),
-        created_at TEXT NOT NULL DEFAULT {_TIMESTAMP_DEFAULT},
-        updated_at TEXT NOT NULL DEFAULT {_TIMESTAMP_DEFAULT},
-        FOREIGN KEY (topology_id)
-            REFERENCES topology_profile(topology_id)
-            ON UPDATE CASCADE ON DELETE RESTRICT,
-        FOREIGN KEY (camera_id)
-            REFERENCES camera(camera_id)
-            ON UPDATE CASCADE ON DELETE RESTRICT,
-        FOREIGN KEY (reference_asset_id) REFERENCES asset(asset_id)
-            ON UPDATE CASCADE ON DELETE RESTRICT
+{_SCENE_ARCHIVE_TABLE_BODY}
     )
     """,
     f"""
@@ -302,22 +338,7 @@ SCHEMA_STATEMENTS = (
     """,
     f"""
     CREATE TABLE IF NOT EXISTS activation_state (
-        singleton_id INTEGER PRIMARY KEY DEFAULT 1 CHECK (singleton_id = 1),
-        stream_profile_id TEXT NOT NULL,
-        topology_id TEXT NOT NULL,
-        topology_revision INTEGER NOT NULL CHECK (topology_revision >= 1),
-        no_parking_scene_id TEXT,
-        road_abnormal_scene_id TEXT,
-        updated_at TEXT NOT NULL DEFAULT {_TIMESTAMP_DEFAULT},
-        FOREIGN KEY (stream_profile_id) REFERENCES stream_binding_profile(profile_id)
-            ON UPDATE CASCADE ON DELETE RESTRICT,
-        FOREIGN KEY (topology_id)
-            REFERENCES topology_profile(topology_id)
-            ON UPDATE CASCADE ON DELETE RESTRICT,
-        FOREIGN KEY (no_parking_scene_id) REFERENCES scene_archive(scene_id)
-            ON UPDATE CASCADE ON DELETE RESTRICT,
-        FOREIGN KEY (road_abnormal_scene_id) REFERENCES scene_archive(scene_id)
-            ON UPDATE CASCADE ON DELETE RESTRICT
+{_ACTIVATION_STATE_TABLE_BODY}
     )
     """,
     f"""
@@ -397,5 +418,58 @@ SCHEMA_MIGRATIONS = {
     1: (
         _MODEL_PIPELINE_TABLE_STATEMENT,
         MODEL_PIPELINE_SEED_STATEMENT,
+    ),
+    2: (
+        """
+        CREATE TEMP TABLE _activation_state_v2_backup AS
+        SELECT * FROM activation_state
+        """,
+        "DROP TABLE activation_state",
+        f"""
+        CREATE TABLE scene_archive_v3 (
+{_SCENE_ARCHIVE_TABLE_BODY}
+        )
+        """,
+        """
+        INSERT INTO scene_archive_v3 (
+            scene_id, scene_type, name, topology_id, topology_revision,
+            camera_id, reference_asset_id, validated_config_json,
+            review_status, created_at, updated_at
+        )
+        SELECT
+            scene_id,
+            scene_type,
+            name,
+            CASE WHEN scene_type = 'no_parking' THEN NULL ELSE topology_id END,
+            CASE
+                WHEN scene_type = 'no_parking' THEN NULL
+                ELSE topology_revision
+            END,
+            camera_id,
+            reference_asset_id,
+            validated_config_json,
+            CASE WHEN scene_type = 'no_parking' THEN 'ready' ELSE review_status END,
+            created_at,
+            updated_at
+        FROM scene_archive
+        """,
+        "DROP TABLE scene_archive",
+        "ALTER TABLE scene_archive_v3 RENAME TO scene_archive",
+        f"""
+        CREATE TABLE activation_state (
+{_ACTIVATION_STATE_TABLE_BODY}
+        )
+        """,
+        """
+        INSERT INTO activation_state (
+            singleton_id, stream_profile_id, topology_id, topology_revision,
+            no_parking_scene_id, road_abnormal_scene_id, updated_at
+        )
+        SELECT
+            singleton_id, stream_profile_id, topology_id, topology_revision,
+            no_parking_scene_id, road_abnormal_scene_id, updated_at
+        FROM _activation_state_v2_backup
+        """,
+        "DROP TABLE _activation_state_v2_backup",
     ),
 }

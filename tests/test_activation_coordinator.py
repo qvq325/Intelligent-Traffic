@@ -107,6 +107,63 @@ class CountingProbe(FakeProbe):
         return super().probe_many(bindings)
 
 
+class SuccessfulSceneProbe:
+    class Result:
+        def as_dict(self):
+            return {
+                "stream_id": "stream-1",
+                "ok": True,
+                "code": "OK",
+                "message": "ok",
+                "elapsed_ms": 1,
+            }
+
+    def probe(self, *_args):
+        return self.Result()
+
+
+class SceneService(FakeService):
+    def __init__(
+        self,
+        *,
+        scene_type,
+        topology_id,
+        topology_revision,
+        review_status,
+    ):
+        super().__init__()
+        self.scene = {
+            "scene_id": "scene-1",
+            "scene_type": scene_type,
+            "topology_id": topology_id,
+            "topology_revision": topology_revision,
+            "review_status": review_status,
+            "camera_id": "camera-1",
+        }
+
+    def get_scene(self, _scene_id):
+        return dict(self.scene)
+
+    def resolve_camera_stream(self, _camera_id):
+        return {
+            "stream_id": "stream-1",
+            "rtsp_url": "rtsp://example.test/1",
+        }
+
+
+class SceneRuntime(FakeRuntime):
+    def __init__(self):
+        super().__init__()
+        self.activated = []
+
+    def activate_scene_runtime(self, scene, _stream_url):
+        self.activated.append(scene["scene_id"])
+        return {"running": True}
+
+    def deactivate_scene_runtime(self, _scene_type):
+        return {"running": False}
+
+
 def test_stream_profile_activation_commits_after_runtime_apply():
     service = FakeService()
     runtime = FakeRuntime()
@@ -323,6 +380,46 @@ def test_scene_switch_failure_restores_previous_scene_runtime():
     assert runtime.scenes == ["new-scene", "old-scene"]
     assert service.state["no_parking_scene_id"] == "old-scene"
     assert service.operations["op-1"]["status"] == "rolled_back"
+
+
+def test_no_parking_activation_ignores_topology_and_review_status():
+    service = SceneService(
+        scene_type="no_parking",
+        topology_id="legacy-topology",
+        topology_revision=1,
+        review_status="needs_review",
+    )
+    service.state.update(topology_id="current-topology", topology_revision=15)
+    runtime = SceneRuntime()
+
+    result = ActivationCoordinator(
+        service,
+        runtime,
+        SuccessfulSceneProbe(),
+    ).activate_scene("scene-1")
+
+    assert result["status"] == "succeeded"
+    assert runtime.activated == ["scene-1"]
+    assert service.state["no_parking_scene_id"] == "scene-1"
+
+
+def test_road_abnormal_activation_still_requires_current_topology():
+    service = SceneService(
+        scene_type="road_abnormal",
+        topology_id="legacy-topology",
+        topology_revision=1,
+        review_status="ready",
+    )
+    service.state.update(topology_id="current-topology", topology_revision=15)
+
+    with pytest.raises(ConfigurationError) as caught:
+        ActivationCoordinator(
+            service,
+            SceneRuntime(),
+            SuccessfulSceneProbe(),
+        ).activate_scene("scene-1")
+
+    assert caught.value.code == "SCENE_TOPOLOGY_MISMATCH"
 
 
 def test_active_stream_update_restores_database_and_mapping_on_reconnect_failure():

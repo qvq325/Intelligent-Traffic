@@ -612,21 +612,22 @@ class ActivationCoordinator:
         with self._exclusive_mutation():
             scene = self.service.get_scene(scene_id)
             state = self.service.get_activation_state()
-            if scene["review_status"] != "ready":
-                raise ConfigurationError(
-                    code="SCENE_NEEDS_REVIEW",
-                    message="场景绑定的拓扑修订已变化，请重新确认后再启用",
-                    details=[{"scene_id": scene_id}],
-                )
-            if (
-                scene["topology_id"] != state["topology_id"]
-                or scene["topology_revision"] != state["topology_revision"]
-            ):
-                raise ConfigurationError(
-                    code="SCENE_TOPOLOGY_MISMATCH",
-                    message="场景与当前激活拓扑不兼容",
-                    details=[{"scene_id": scene_id}],
-                )
+            if scene["scene_type"] == "road_abnormal":
+                if scene["review_status"] != "ready":
+                    raise ConfigurationError(
+                        code="SCENE_NEEDS_REVIEW",
+                        message="场景绑定的拓扑修订已变化，请重新确认后再启用",
+                        details=[{"scene_id": scene_id}],
+                    )
+                if (
+                    scene["topology_id"] != state["topology_id"]
+                    or scene["topology_revision"] != state["topology_revision"]
+                ):
+                    raise ConfigurationError(
+                        code="SCENE_TOPOLOGY_MISMATCH",
+                        message="场景与当前激活拓扑不兼容",
+                        details=[{"scene_id": scene_id}],
+                    )
             stream = self.service.resolve_camera_stream(scene["camera_id"])
             if stream is None:
                 raise ConfigurationError(

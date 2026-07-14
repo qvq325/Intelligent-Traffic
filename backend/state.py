@@ -636,9 +636,7 @@ class ApplicationState:
             payload,
             runtime_already_applied=True,
         )
-        self.no_parking.stop()
         self.road_abnormal.stop()
-        self.no_parking_video.stop_stream()
         self.road_abnormal_video.stop_stream()
         return updated
 
@@ -647,19 +645,14 @@ class ApplicationState:
         compatible_scenes: list[dict] = []
         if self.configuration_service is not None:
             state = self.configuration_service.get_activation_state()
-            for field, scene_type in (
-                ("no_parking_scene_id", "no_parking"),
-                ("road_abnormal_scene_id", "road_abnormal"),
-            ):
-                scene_id = state.get(field)
-                if not scene_id:
-                    continue
+            scene_id = state.get("road_abnormal_scene_id")
+            if scene_id:
                 scene = self.configuration_service.get_scene(scene_id)
                 if (
                     scene["topology_id"] != topology["topology_id"]
                     or scene["topology_revision"] != topology["revision"]
                 ):
-                    self.deactivate_scene_runtime(scene_type)
+                    self.deactivate_scene_runtime("road_abnormal")
                     deactivated.append(scene_id)
                 else:
                     compatible_scenes.append(scene)

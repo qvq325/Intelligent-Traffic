@@ -280,3 +280,106 @@ def test_topology_delete_ignores_no_parking_but_rejects_road_abnormal_reference(
     with pytest.raises(ConfigurationError) as caught:
         service.delete_topology(road_topology["topology_id"])
     assert caught.value.code == "TOPOLOGY_IN_USE"
+
+
+def test_apply_topology_deactivates_only_road_abnormal_scene():
+    class Service:
+        def get_activation_state(self):
+            return {
+                "no_parking_scene_id": "no-parking-1",
+                "road_abnormal_scene_id": "road-abnormal-1",
+            }
+
+        def get_scene(self, scene_id):
+            return {
+                "scene_id": scene_id,
+                "scene_type": (
+                    "no_parking" if scene_id.startswith("no-parking")
+                    else "road_abnormal"
+                ),
+                "topology_id": "old-topology",
+                "topology_revision": 1,
+                "camera_id": "camera-a",
+            }
+
+    deactivated = []
+    installed = []
+    runtime = SimpleNamespace(
+        configuration_service=Service(),
+        deactivate_scene_runtime=lambda scene_type: deactivated.append(scene_type),
+        _install_topology_runtime=lambda topology: installed.append(
+            topology["topology_id"]
+        ),
+    )
+
+    result = ApplicationState.apply_topology(
+        runtime,
+        {
+            "topology_id": "new-topology",
+            "revision": 2,
+        },
+    )
+
+    assert deactivated == ["road_abnormal"]
+    assert result["deactivated_scene_ids"] == ["road-abnormal-1"]
+    assert installed == ["new-topology"]
+
+
+def test_persist_active_topology_stops_only_road_abnormal_runtime():
+    class Service:
+        def get_activation_state(self):
+            return {
+                "topology_id": "topology-1",
+                "topology_revision": 1,
+                "no_parking_scene_id": "no-parking-1",
+                "road_abnormal_scene_id": "road-abnormal-1",
+            }
+
+        def get_topology(self, _topology_id):
+            return {
+                "name": "拓扑",
+                "map_asset_id": "map-asset",
+                "map_width": 1105,
+                "map_height": 740,
+            }
+
+    class Coordinator:
+        def update_topology(self, topology_id, payload, *, runtime_already_applied):
+            assert topology_id == "topology-1"
+            assert payload["nodes"] == []
+            assert runtime_already_applied is True
+            return {"revision": 2}
+
+    class StopSpy:
+        def __init__(self):
+            self.calls = 0
+
+        def stop(self):
+            self.calls += 1
+
+        def stop_stream(self):
+            self.calls += 1
+
+    no_parking = StopSpy()
+    no_parking_video = StopSpy()
+    road_abnormal = StopSpy()
+    road_abnormal_video = StopSpy()
+    runtime = SimpleNamespace(
+        configuration_enabled=True,
+        ensure_active_topology_editable=lambda: None,
+        configuration_service=Service(),
+        traffic_map=SimpleNamespace(segments={}, cameras={}),
+        activation_coordinator=Coordinator(),
+        no_parking=no_parking,
+        no_parking_video=no_parking_video,
+        road_abnormal=road_abnormal,
+        road_abnormal_video=road_abnormal_video,
+    )
+
+    result = ApplicationState.persist_active_topology(runtime)
+
+    assert result == {"revision": 2}
+    assert no_parking.calls == 0
+    assert no_parking_video.calls == 0
+    assert road_abnormal.calls == 1
+    assert road_abnormal_video.calls == 1

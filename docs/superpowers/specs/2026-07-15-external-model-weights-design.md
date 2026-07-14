@@ -14,8 +14,8 @@ the repository must not transfer any `*.pt` objects.
 - Prevent future `*.pt` files from being added to Git.
 - Give team members one committed document that explains where externally
   distributed weights must be placed and how to verify them.
-- Preserve the unrelated local deletion of `img/img.zip` without including it
-  in this change.
+- Preserve the existing deletion of `img/img.zip` during the history rewrite
+  and include that deletion in the final implementation commit.
 
 ## Non-goals
 
@@ -68,8 +68,8 @@ directed to obtain the files from the project group.
 - Create a Git bundle of the current references before rewriting history.
 - Back up the physical weight files outside the repository and compare hashes
   before and after restoration.
-- Preserve and restore the unrelated `img/img.zip` deletion as an unstaged
-  user change.
+- Preserve the `img/img.zip` deletion while obtaining a clean worktree for the
+  rewrite, then stage it as part of the final implementation commit.
 - Keep the original remote commit ID as the expected lease value.
 - Do not fetch the old remote branch into the cleaned repository.
 
@@ -89,4 +89,4 @@ The implementation is complete only when all of the following hold:
 7. The full test suite passes.
 8. GitNexus `detect_changes` reports no unexpected code-flow impact before the
    implementation commit.
-9. The unrelated `img/img.zip` deletion remains present and uncommitted.
+9. The final implementation commit records the deletion of `img/img.zip`.

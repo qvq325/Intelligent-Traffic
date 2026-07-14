@@ -726,9 +726,22 @@ class ImportExportService:
                 {"scene_id", "scene_type", "name", "topology_id", "topology_revision", "camera_id", "reference_asset_id", "config", "review_status"},
                 "scene-archives.scenes[]",
             )
-            if scene["scene_id"] in scene_ids or scene["topology_id"] not in target_topologies or scene["camera_id"] not in camera_ids:
+            if scene["scene_id"] in scene_ids or scene["camera_id"] not in camera_ids:
                 raise ConfigurationError("CONFIG_REFERENCE_INVALID", "场景 ID 重复或引用无效")
             scene_ids.add(scene["scene_id"])
+            if scene["scene_type"] == "no_parking":
+                scene["topology_id"] = None
+                scene["topology_revision"] = None
+                scene["review_status"] = "ready"
+            elif (
+                scene["scene_type"] == "road_abnormal"
+                and scene["topology_id"] not in target_topologies
+            ):
+                raise ConfigurationError(
+                    "CONFIG_REFERENCE_INVALID",
+                    "道路异常场景引用未知拓扑",
+                    details=[{"scene_id": scene["scene_id"]}],
+                )
             asset = assets_by_id.get(scene["reference_asset_id"]) if scene["reference_asset_id"] else None
             reference_image = f"reference_{scene['scene_id']}.jpg" if asset else ""
             payload = {

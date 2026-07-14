@@ -574,6 +574,174 @@ def test_export_preflight_apply_roundtrip_and_one_time_token(
     assert reused.json()["error"]["code"] == "IMPORT_TOKEN_INVALID"
 
 
+def test_no_parking_package_roundtrip_normalizes_legacy_topology_binding(
+    configuration_client,
+    monkeypatch,
+):
+    package = configuration_client.post("/api/config/exports").content
+    path = "config/scene-archives.json"
+    with zipfile.ZipFile(io.BytesIO(package)) as archive:
+        scenes = json.loads(archive.read(path))["scenes"]
+    no_parking = next(
+        item for item in scenes if item["scene_type"] == "no_parking"
+    )
+    assert no_parking["topology_id"] is None
+    assert no_parking["topology_revision"] is None
+    assert no_parking["review_status"] == "ready"
+
+    def add_legacy_binding(entries, manifest):
+        document = json.loads(entries[path])
+        scene = next(
+            item
+            for item in document["scenes"]
+            if item["scene_id"] == no_parking["scene_id"]
+        )
+        scene["topology_id"] = "builtin-default-topology"
+        scene["topology_revision"] = 99
+        scene["review_status"] = "needs_review"
+        entries[path] = json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        _refresh_manifest_file(manifest, path, entries[path])
+
+    monkeypatch.setattr(
+        configuration_client.app.state.runtime.import_export_service,
+        "preflight_validator",
+        lambda _documents: {
+            "device": "cpu",
+            "streams": [],
+            "topology_id": "builtin-default-topology",
+            "topology_revision": 1,
+        },
+    )
+    preflight = configuration_client.post(
+        "/api/config/imports/preflight",
+        files={
+            "file": (
+                "legacy-no-parking.zip",
+                _rewrite_package(package, add_legacy_binding),
+                "application/zip",
+            )
+        },
+    )
+    assert preflight.status_code == 200
+    applied = configuration_client.post(
+        f"/api/config/imports/{preflight.json()['token']}/apply",
+        json={"confirm": True},
+    )
+    assert applied.status_code == 200
+
+    installed = next(
+        item
+        for item in configuration_client.get(
+            "/api/config/scenes?scene_type=no_parking"
+        ).json()
+        if item["scene_id"] == no_parking["scene_id"]
+    )
+    assert installed["topology_id"] is None
+    assert installed["topology_revision"] is None
+    assert installed["review_status"] == "ready"
+
+
+def test_package_preflight_allows_active_no_parking_without_topology(
+    configuration_client,
+    monkeypatch,
+):
+    package = configuration_client.post("/api/config/exports").content
+    scenes_path = "config/scene-archives.json"
+    activation_path = "config/activation-state.json"
+
+    def activate_no_parking(entries, manifest):
+        scenes = json.loads(entries[scenes_path])["scenes"]
+        scene_id = next(
+            item["scene_id"]
+            for item in scenes
+            if item["scene_type"] == "no_parking"
+        )
+        document = json.loads(entries[activation_path])
+        document["activation"]["no_parking_scene_id"] = scene_id
+        entries[activation_path] = json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        _refresh_manifest_file(manifest, activation_path, entries[activation_path])
+
+    runtime = configuration_client.app.state.runtime
+    monkeypatch.setattr(
+        runtime.probe_service,
+        "probe_many",
+        lambda bindings: [
+            {
+                "stream_id": item["stream_id"],
+                "ok": True,
+                "code": "OK",
+                "message": "ok",
+                "elapsed_ms": 1,
+            }
+            for item in bindings
+        ],
+    )
+
+    response = configuration_client.post(
+        "/api/config/imports/preflight",
+        files={
+            "file": (
+                "active-no-parking.zip",
+                _rewrite_package(package, activate_no_parking),
+                "application/zip",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+
+
+def test_package_rejects_road_abnormal_scene_with_unknown_topology(
+    configuration_client,
+):
+    package = configuration_client.post("/api/config/exports").content
+    path = "config/scene-archives.json"
+    scene_id = None
+
+    def break_road_binding(entries, manifest):
+        nonlocal scene_id
+        document = json.loads(entries[path])
+        scene = next(
+            item
+            for item in document["scenes"]
+            if item["scene_type"] == "road_abnormal"
+        )
+        scene_id = scene["scene_id"]
+        scene["topology_id"] = "missing-topology"
+        entries[path] = json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        _refresh_manifest_file(manifest, path, entries[path])
+
+    response = configuration_client.post(
+        "/api/config/imports/preflight",
+        files={
+            "file": (
+                "bad-road-topology.zip",
+                _rewrite_package(package, break_road_binding),
+                "application/zip",
+            )
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "CONFIG_REFERENCE_INVALID"
+    assert response.json()["error"]["details"] == [{"scene_id": scene_id}]
+
+
 def test_export_includes_complete_path_free_model_pipeline_document(
     configuration_client,
 ):

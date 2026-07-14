@@ -392,14 +392,14 @@ class ApplicationState:
             if scene_id is None:
                 continue
             scene = scenes_by_id[scene_id]
-            if (
+            if scene["scene_type"] == "road_abnormal" and (
                 scene["topology_id"] != activation["topology_id"]
                 or int(scene["topology_revision"]) != int(activation["topology_revision"])
                 or scene["review_status"] != "ready"
             ):
                 raise ConfigurationError(
                     "CONFIG_ACTIVATION_INVALID",
-                    "目标激活场景与拓扑修订不兼容",
+                    "目标激活道路异常场景与拓扑修订不兼容",
                     details=[{"scene_id": scene_id}],
                 )
         return {

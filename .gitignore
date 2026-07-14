@@ -75,3 +75,5 @@ ehthumbs.db
 ~$*
 /nul
 /.gitnexus/
+
+**/*.pt

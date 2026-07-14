@@ -864,10 +864,13 @@ class VideoStreamService:
 
         vehicles = len(result_list)
         plates = sum(1 for result in result_list if result.has_plate)
-        lines = [f"车辆: {vehicles} 辆  |  车牌: {plates} 个 (缓存)"]
+        lines = [f"车辆检测: {vehicles} 辆  |  车牌识别: {plates} 个"]
         if self.whitelist_manager.enabled and self.whitelist_manager.count:
             matched = sum(1 for result in result_list if result.whitelisted)
-            lines.append(f"白名单: {matched}/{vehicles}  |  总数: {self.whitelist_manager.count}")
+            lines.append(
+                f"白名单匹配: {matched}/{vehicles}  |  "
+                f"白名单总数: {self.whitelist_manager.count}"
+            )
         draw_info_panel(annotated, lines, position=(10, 10), font_size=14)
         return annotated
 

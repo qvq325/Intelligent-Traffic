@@ -109,6 +109,33 @@ def _result(camera_id="camera-1"):
     )
 
 
+def test_cached_detection_panel_matches_inference_panel_labels(monkeypatch):
+    class WhitelistSummary:
+        enabled = True
+        count = 2
+
+    panel_lines = []
+    monkeypatch.setattr(
+        "draw_utils.draw_vehicle_box",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "draw_utils.draw_info_panel",
+        lambda _frame, lines, **_kwargs: panel_lines.append(list(lines)),
+    )
+    service = VideoStreamService(WhitelistSummary())
+
+    service._draw_cached_results(
+        np.zeros((8, 8, 3), dtype=np.uint8),
+        [_result()],
+    )
+
+    assert panel_lines == [[
+        "车辆检测: 1 辆  |  车牌识别: 0 个",
+        "白名单匹配: 0/1  |  白名单总数: 2",
+    ]]
+
+
 def test_video_service_pause_state_and_source_switch():
     service = VideoStreamService(WhitelistManager())
 

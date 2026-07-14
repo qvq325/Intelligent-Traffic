@@ -526,7 +526,7 @@ class VideoStreamService:
                 except Exception as exc:
                     self._set_detection_status(f"检测异常: {exc}")
                     annotated = frame
-            elif processing.enabled and last_results:
+            elif processing.enabled and last_results_snapshot is not None:
                 if (
                     last_results_snapshot is not None
                     and self._same_processing_token(

@@ -136,6 +136,52 @@ def test_cached_detection_panel_matches_inference_panel_labels(monkeypatch):
     ]]
 
 
+def test_empty_detection_results_are_cached_between_inference_frames(monkeypatch):
+    processor = _ProcessorDouble()
+    processor.on_process = lambda frame, _camera_id: (
+        np.full_like(frame, 90),
+        [],
+    )
+    service = VideoStreamService(
+        WhitelistManager(),
+        processor_factory=lambda _options: processor,
+    )
+    service.apply_model_pipeline_options(
+        replace(_pipeline_options(), frame_interval=2)
+    )
+    service._ensure_processor()
+    frames = [
+        np.zeros((8, 8, 3), dtype=np.uint8),
+        np.full((8, 8, 3), 10, dtype=np.uint8),
+        np.full((8, 8, 3), 20, dtype=np.uint8),
+    ]
+    capture = _CaptureDouble(frames, on_exhausted=service._stop_event.set)
+    published_frames = []
+    cached_draws = []
+    monkeypatch.setattr(service, "_open_capture", lambda _source: capture)
+    monkeypatch.setattr(
+        service,
+        "_publish_frame",
+        lambda frame, _snapshot=None: (
+            published_frames.append(frame.copy()) or True
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_draw_cached_results",
+        lambda frame, results: (
+            cached_draws.append(list(results)) or np.full_like(frame, 200)
+        ),
+    )
+    service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
+
+    service._run()
+
+    assert len(processor.process_calls) == 1
+    assert cached_draws == [[]]
+    assert [int(frame[0, 0, 0]) for frame in published_frames] == [0, 90, 200]
+
+
 def test_video_service_pause_state_and_source_switch():
     service = VideoStreamService(WhitelistManager())
 

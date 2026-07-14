@@ -76,4 +76,12 @@ ehthumbs.db
 /nul
 /.gitnexus/
 
-**/*.pt
+# Local test videos and captured media
+/videos/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flv
+*.wmv
+*.webm

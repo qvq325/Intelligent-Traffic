@@ -219,6 +219,21 @@ class MOGAnomalyEngine:
         contours, _ = cv2.findContours(
             foreground, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
+        analysis_area = (
+            int(np.count_nonzero(roi_mask))
+            if roi_mask is not None
+            else width * height
+        )
+        foreground_ratio = float(np.count_nonzero(foreground)) / max(
+            1,
+            analysis_area,
+        )
+        if foreground_ratio >= 0.05 and len(contours) >= 30:
+            self.mog.apply(frame, learningRate=0.05)
+            self._tracked.clear()
+            self._recent_vehicle_mask = None
+            return []
+
         active_tracks: set[int] = set()
         edge_margin = 5
         for contour in contours:

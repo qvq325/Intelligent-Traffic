@@ -1200,13 +1200,31 @@ class RoadAbnormalMonitor:
                 next_frame_count = frame_count + 1
                 mog_error = "道路异常检测失败: " + type(exc).__name__
 
+            event_ready = any(
+                max(
+                    0.0,
+                    float(candidate.get("observed_duration", 0.0)),
+                )
+                >= scene.persistence_seconds
+                for candidate in foreground
+            )
             if (
                 road_abnormal_mode == "mog"
                 and foreground
-                and frame_count - known_objects_frame > 2
+                and (
+                    frame_count - known_objects_frame > 2
+                    or event_ready
+                )
             ):
                 try:
-                    known_objects = detector.detect(frame, detector_threshold)
+                    verification_threshold = max(
+                        0.05,
+                        detector_threshold * 0.8,
+                    )
+                    known_objects = detector.detect(
+                        frame,
+                        verification_threshold,
+                    )
                     known_objects_frame = frame_count
                     detected_this_frame = True
                     detector_error = ""

@@ -1495,6 +1495,42 @@ def test_headless_trained_mog_supports_multiple_rois_overlap_and_reset():
         ) == []
 
 
+def test_trained_mog_adapts_fragmented_scene_wide_changes_without_alerting():
+    from backend.trained_mog import MOGAnomalyEngine
+
+    mask = np.zeros((200, 200), dtype=np.uint8)
+    for y in range(10, 151, 20):
+        for x in range(10, 151, 20):
+            mask[y : y + 10, x : x + 10] = 255
+
+    class FragmentedForeground:
+        def __init__(self):
+            self.learning_rates = []
+
+        def apply(self, _frame, learningRate):
+            self.learning_rates.append(learningRate)
+            return mask.copy()
+
+    foreground = FragmentedForeground()
+    engine = MOGAnomalyEngine(
+        min_area=20,
+        min_duration=0.0,
+        max_duration=1.0,
+        warmup_frames=0,
+    )
+    engine.mog = foreground
+
+    alerts = engine.process(
+        np.full((200, 200, 3), 255, dtype=np.uint8),
+        [],
+        timestamp=1.0,
+    )
+
+    assert alerts == []
+    assert engine._tracked == {}
+    assert foreground.learning_rates == [0.001, 0.05]
+
+
 def test_trained_mog_observation_duration_is_not_counted_twice(tmp_path):
     monitor = _monitor(tmp_path)
     reference = monitor.capture_reference(b"jpeg", "camera", 100, 100)
@@ -1634,3 +1670,59 @@ def test_disabled_pipeline_publishes_frame_without_yolo_or_mog_calls(tmp_path):
     assert returned is frame
     assert len(detector.calls) == before_detector
     assert len(mog.process_calls) == before_mog
+
+
+def test_alert_verification_uses_bounded_lower_detector_threshold(tmp_path):
+    normal = {
+        "bbox": (25, 25, 55, 55),
+        "class_name": "car",
+        "class_name_cn": "小汽车",
+        "confidence": 0.41,
+        "track_id": -1,
+    }
+    detector = SequencedDetector([[], [normal]])
+    options = replace(
+        _trained_options(tmp_path),
+        frame_interval=10,
+        yolo_threshold=0.5,
+    )
+    monitor = trained_monitor(
+        tmp_path,
+        detector,
+        SequencedMog([mog_alert()]),
+        options=options,
+    )
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    for frame_index in range(4):
+        monitor.process_frame("camera", frame, now=float(frame_index))
+
+    assert [threshold for _frame, threshold in detector.calls] == [0.5, 0.4]
+
+
+def test_event_ready_mog_candidate_is_verified_even_with_fresh_empty_yolo(
+    tmp_path,
+):
+    normal = {
+        "bbox": (25, 25, 55, 55),
+        "class_name": "car",
+        "class_name_cn": "小汽车",
+        "confidence": 0.41,
+        "track_id": -1,
+    }
+    detector = SequencedDetector([[], [normal]])
+    ready_alert = mog_alert()
+    ready_alert.observed_duration = 3.0
+    monitor = trained_monitor(
+        tmp_path,
+        detector,
+        SequencedMog([ready_alert]),
+    )
+
+    monitor.process_frame(
+        "camera",
+        np.zeros((100, 100, 3), dtype=np.uint8),
+        now=3.0,
+    )
+
+    assert [threshold for _frame, threshold in detector.calls] == [0.5, 0.4]
+    assert monitor.status()["candidates"] == []

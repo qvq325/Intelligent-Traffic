@@ -1,6 +1,7 @@
 from dataclasses import replace
 from pathlib import Path
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -99,6 +100,25 @@ class _CaptureDouble:
         return 30.0
 
 
+class _ContinuousCapture:
+    def __init__(self, *, delay=0.005):
+        self.delay = delay
+        self.read_count = 0
+        self.released = False
+
+    def read(self):
+        time.sleep(self.delay)
+        self.read_count += 1
+        frame = np.full((8, 8, 3), self.read_count % 255, dtype=np.uint8)
+        return True, frame
+
+    def release(self):
+        self.released = True
+
+    def get(self, _property):
+        return 30.0
+
+
 def _result(camera_id="camera-1"):
     return DetectionResult(
         vehicle_bbox=(0, 0, 4, 4),
@@ -150,22 +170,7 @@ def test_empty_detection_results_are_cached_between_inference_frames(monkeypatch
         replace(_pipeline_options(), frame_interval=2)
     )
     service._ensure_processor()
-    frames = [
-        np.zeros((8, 8, 3), dtype=np.uint8),
-        np.full((8, 8, 3), 10, dtype=np.uint8),
-        np.full((8, 8, 3), 20, dtype=np.uint8),
-    ]
-    capture = _CaptureDouble(frames, on_exhausted=service._stop_event.set)
-    published_frames = []
     cached_draws = []
-    monkeypatch.setattr(service, "_open_capture", lambda _source: capture)
-    monkeypatch.setattr(
-        service,
-        "_publish_frame",
-        lambda frame, _snapshot=None: (
-            published_frames.append(frame.copy()) or True
-        ),
-    )
     monkeypatch.setattr(
         service,
         "_draw_cached_results",
@@ -174,12 +179,193 @@ def test_empty_detection_results_are_cached_between_inference_frames(monkeypatch
         ),
     )
     service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
+    work = video_stream_module._InferenceWork(
+        source=service._requested_source,
+        source_revision=service._source_revision,
+        frame=np.zeros((8, 8, 3), dtype=np.uint8),
+    )
 
-    service._run()
+    assert service._process_inference_work(work)
+    processing = service._processing_snapshot()
+    cached = service._cached_detection_results(
+        processing,
+        service._source_revision,
+    )
+    annotated = service._draw_cached_results(
+        np.full((8, 8, 3), 20, dtype=np.uint8),
+        cached,
+    )
 
     assert len(processor.process_calls) == 1
     assert cached_draws == [[]]
-    assert [int(frame[0, 0, 0]) for frame in published_frames] == [0, 90, 200]
+    assert int(annotated[0, 0, 0]) == 200
+
+
+def test_inference_slot_keeps_only_the_latest_frame():
+    service = VideoStreamService(WhitelistManager())
+    service.apply_model_pipeline_options(_pipeline_options())
+    service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
+    source = service._requested_source
+
+    assert service._submit_inference(
+        source,
+        service._source_revision,
+        np.zeros((8, 8, 3), dtype=np.uint8),
+    )
+    assert service._submit_inference(
+        source,
+        service._source_revision,
+        np.full((8, 8, 3), 2, dtype=np.uint8),
+    )
+
+    with service._condition:
+        pending = service._pending_inference
+    assert pending is not None
+    assert np.all(pending.frame == 2)
+
+
+def test_blocked_inference_does_not_block_capture_publication(monkeypatch):
+    inference_started = threading.Event()
+    release_inference = threading.Event()
+    continued_publication = threading.Event()
+    published_frames = []
+    publication_baseline = [None]
+    processor = _ProcessorDouble()
+    capture = _ContinuousCapture()
+
+    def process(frame, _camera_id):
+        inference_started.set()
+        assert release_inference.wait(timeout=5.0)
+        return frame, []
+
+    def publish(frame, _snapshot=None):
+        published_frames.append(frame.copy())
+        baseline = publication_baseline[0]
+        if baseline is not None and len(published_frames) >= baseline + 3:
+            continued_publication.set()
+        return True
+
+    processor.on_process = process
+    service = VideoStreamService(
+        WhitelistManager(),
+        processor_factory=lambda _options: processor,
+    )
+    service.apply_model_pipeline_options(
+        replace(_pipeline_options(), frame_interval=1)
+    )
+    monkeypatch.setattr(service, "_open_capture", lambda _source: capture)
+    monkeypatch.setattr(service, "_publish_frame", publish)
+    service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
+
+    service.start()
+    try:
+        assert inference_started.wait(timeout=2.0)
+        publication_baseline[0] = len(published_frames)
+        assert continued_publication.wait(timeout=1.0)
+    finally:
+        service.update_detection_settings(enabled=False)
+        release_inference.set()
+        service.stop(timeout=2.0)
+
+    assert capture.read_count > publication_baseline[0]
+
+
+def test_slow_model_loading_does_not_block_capture_publication(monkeypatch):
+    loading_started = threading.Event()
+    release_loading = threading.Event()
+    continued_publication = threading.Event()
+    published_count = [0]
+    publication_baseline = [None]
+    capture = _ContinuousCapture()
+
+    class LoadingProcessor(_ProcessorDouble):
+        def initialize(self):
+            loading_started.set()
+            assert release_loading.wait(timeout=5.0)
+            return super().initialize()
+
+    def publish(_frame, _snapshot=None):
+        published_count[0] += 1
+        baseline = publication_baseline[0]
+        if baseline is not None and published_count[0] >= baseline + 3:
+            continued_publication.set()
+        return True
+
+    service = VideoStreamService(
+        WhitelistManager(),
+        processor_factory=lambda _options: LoadingProcessor(),
+    )
+    service.apply_model_pipeline_options(
+        replace(_pipeline_options(), frame_interval=1)
+    )
+    monkeypatch.setattr(service, "_open_capture", lambda _source: capture)
+    monkeypatch.setattr(service, "_publish_frame", publish)
+    service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
+
+    service.start()
+    try:
+        assert loading_started.wait(timeout=2.0)
+        publication_baseline[0] = published_count[0]
+        assert continued_publication.wait(timeout=1.0)
+    finally:
+        service.update_detection_settings(enabled=False)
+        release_loading.set()
+        service.stop(timeout=2.0)
+
+    assert capture.read_count > publication_baseline[0]
+
+
+def test_model_loading_uses_the_latest_queued_frame():
+    loading_started = threading.Event()
+    release_loading = threading.Event()
+    processed_values = []
+
+    class LoadingProcessor(_ProcessorDouble):
+        def initialize(self):
+            loading_started.set()
+            assert release_loading.wait(timeout=5.0)
+            return super().initialize()
+
+    processor = LoadingProcessor()
+    processor.on_process = lambda frame, _camera_id: (
+        processed_values.append(int(frame[0, 0, 0])) or frame,
+        [],
+    )
+    service = VideoStreamService(
+        WhitelistManager(),
+        processor_factory=lambda _options: processor,
+    )
+    service.apply_model_pipeline_options(_pipeline_options())
+    service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
+    source = service._requested_source
+    first_work = video_stream_module._InferenceWork(
+        source=source,
+        source_revision=service._source_revision,
+        frame=np.zeros((8, 8, 3), dtype=np.uint8),
+    )
+    worker = threading.Thread(
+        target=service._process_inference_work,
+        args=(first_work,),
+    )
+    worker.start()
+    assert loading_started.wait(timeout=2.0)
+
+    service._submit_inference(
+        source,
+        service._source_revision,
+        np.full((8, 8, 3), 2, dtype=np.uint8),
+    )
+    service._submit_inference(
+        source,
+        service._source_revision,
+        np.full((8, 8, 3), 3, dtype=np.uint8),
+    )
+    release_loading.set()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert processed_values == [3]
+    assert service._pending_inference is None
 
 
 def test_video_service_pause_state_and_source_switch():
@@ -459,7 +645,7 @@ def test_failed_processor_redacts_windows_model_paths_case_insensitively(
         assert rendered.casefold().replace("\\", "/") not in normalized_status
 
 
-def test_failed_replacement_keeps_active_thresholds_and_interval(monkeypatch):
+def test_failed_replacement_keeps_active_thresholds_and_interval():
     processors = {}
     initial = replace(
         _pipeline_options(revision=1),
@@ -492,20 +678,14 @@ def test_failed_replacement_keeps_active_thresholds_and_interval(monkeypatch):
     service.apply_model_pipeline_options(replacement)
     service._ensure_processor()
 
-    frame = np.zeros((8, 8, 3), dtype=np.uint8)
-    capture = _CaptureDouble(
-        [frame],
-        on_exhausted=service._stop_event.set,
-    )
-    monkeypatch.setattr(service, "_open_capture", lambda _source: capture)
-    monkeypatch.setattr(
-        service,
-        "_publish_frame",
-        lambda _frame, _snapshot=None: True,
-    )
     service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
+    work = video_stream_module._InferenceWork(
+        source=service._requested_source,
+        source_revision=service._source_revision,
+        frame=np.zeros((8, 8, 3), dtype=np.uint8),
+    )
 
-    service._run()
+    assert service._process_inference_work(work)
 
     runtime = service._settings_snapshot()
     assert runtime.yolo_threshold == 0.21
@@ -522,18 +702,16 @@ def test_failed_replacement_keeps_active_thresholds_and_interval(monkeypatch):
     assert active.lpr_threshold == 0.31
 
 
-def test_disable_discards_inflight_processor_results_and_annotation(monkeypatch):
+def test_disable_discards_inflight_processor_results_and_annotation():
     started = threading.Event()
     release = threading.Event()
     callbacks = []
-    published_frames = []
     processor = _ProcessorDouble()
     frame = np.zeros((8, 8, 3), dtype=np.uint8)
 
     def process(blocked_frame, _camera_id):
         started.set()
         release.wait(timeout=5.0)
-        service._stop_event.set()
         return np.full_like(blocked_frame, 255), [_result()]
 
     processor.on_process = process
@@ -550,17 +728,16 @@ def test_disable_discards_inflight_processor_results_and_annotation(monkeypatch)
         replace(_pipeline_options(), frame_interval=1)
     )
     service._ensure_processor()
-    capture = _CaptureDouble([frame], on_exhausted=service._stop_event.set)
-    monkeypatch.setattr(service, "_open_capture", lambda _source: capture)
-    monkeypatch.setattr(
-        service,
-        "_publish_frame",
-        lambda annotated, _snapshot=None: (
-            published_frames.append(annotated.copy()) or True
-        ),
-    )
     service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
-    worker = threading.Thread(target=service._run)
+    work = video_stream_module._InferenceWork(
+        source=service._requested_source,
+        source_revision=service._source_revision,
+        frame=frame,
+    )
+    worker = threading.Thread(
+        target=service._process_inference_work,
+        args=(work,),
+    )
     worker.start()
     assert started.wait(timeout=2.0)
 
@@ -571,8 +748,7 @@ def test_disable_discards_inflight_processor_results_and_annotation(monkeypatch)
     assert not worker.is_alive()
     assert service.status()["results"] == []
     assert callbacks == []
-    assert len(published_frames) == 1
-    assert np.array_equal(published_frames[0], frame)
+    assert service._detection_overlay is None
 
 
 def test_disable_during_encoding_does_not_commit_stale_annotation(monkeypatch):
@@ -582,10 +758,6 @@ def test_disable_during_encoding_does_not_commit_stale_annotation(monkeypatch):
     frame = np.zeros((8, 8, 3), dtype=np.uint8)
     annotated_jpeg = b"annotated-jpeg"
 
-    processor.on_process = lambda blocked_frame, _camera_id: (
-        np.full_like(blocked_frame, 255),
-        [_result()],
-    )
     service = VideoStreamService(
         WhitelistManager(),
         processor_factory=lambda _options: processor,
@@ -594,8 +766,6 @@ def test_disable_during_encoding_does_not_commit_stale_annotation(monkeypatch):
         replace(_pipeline_options(), frame_interval=1)
     )
     service._ensure_processor()
-    capture = _CaptureDouble([frame], on_exhausted=service._stop_event.set)
-    monkeypatch.setattr(service, "_open_capture", lambda _source: capture)
 
     def encode(_extension, encoded_frame, _parameters):
         if np.all(encoded_frame == 255):
@@ -606,7 +776,11 @@ def test_disable_during_encoding_does_not_commit_stale_annotation(monkeypatch):
 
     monkeypatch.setattr(video_stream_module.cv2, "imencode", encode)
     service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
-    worker = threading.Thread(target=service._run)
+    snapshot = service._processing_snapshot()
+    worker = threading.Thread(
+        target=service._publish_frame,
+        args=(np.full_like(frame, 255), snapshot),
+    )
     worker.start()
     assert encoding_started.wait(timeout=2.0)
 
@@ -658,11 +832,7 @@ def test_disable_during_first_listener_prevents_later_listener_callback():
     assert callbacks == ["first"]
 
 
-def test_successful_swap_clears_results_and_does_not_draw_old_cache(monkeypatch):
-    first_frame_published = threading.Event()
-    release_second_frame = threading.Event()
-    published_frames = []
-    cached_draws = []
+def test_successful_swap_clears_results_and_does_not_draw_old_cache():
     processors = {}
     initial = replace(_pipeline_options(revision=1), frame_interval=1)
     replacement = replace(
@@ -685,45 +855,26 @@ def test_successful_swap_clears_results_and_does_not_draw_old_cache(monkeypatch)
     service = VideoStreamService(WhitelistManager(), processor_factory=factory)
     service.apply_model_pipeline_options(initial)
     service._ensure_processor()
-    frames = [
-        np.zeros((8, 8, 3), dtype=np.uint8),
-        np.full((8, 8, 3), 10, dtype=np.uint8),
-    ]
-    capture = _CaptureDouble(frames, on_exhausted=service._stop_event.set)
-    monkeypatch.setattr(service, "_open_capture", lambda _source: capture)
-
-    def publish_frame(frame, _snapshot=None):
-        published_frames.append(frame.copy())
-        if len(published_frames) == 1:
-            first_frame_published.set()
-            release_second_frame.wait(timeout=5.0)
-        else:
-            service._stop_event.set()
-        return True
-
-    monkeypatch.setattr(service, "_publish_frame", publish_frame)
-    monkeypatch.setattr(
-        service,
-        "_draw_cached_results",
-        lambda frame, results: (
-            cached_draws.append(list(results)) or np.full_like(frame, 200)
-        ),
-    )
     service.select_source("camera-1", "camera-1", "rtsp://example.test/live")
-    worker = threading.Thread(target=service._run)
-    worker.start()
-    assert first_frame_published.wait(timeout=2.0)
+    work = video_stream_module._InferenceWork(
+        source=service._requested_source,
+        source_revision=service._source_revision,
+        frame=np.zeros((8, 8, 3), dtype=np.uint8),
+    )
+    assert service._process_inference_work(work)
+    assert service.status()["results"]
 
     service.apply_model_pipeline_options(replacement)
     service._ensure_processor()
     results_immediately_after_swap = service.status()["results"]
-    release_second_frame.set()
-    worker.join(timeout=2.0)
+    cached_after_swap = service._cached_detection_results(
+        service._processing_snapshot(),
+        service._source_revision,
+    )
 
-    assert not worker.is_alive()
     assert results_immediately_after_swap == []
     assert service.status()["results"] == []
-    assert cached_draws == []
+    assert cached_after_swap is None
     assert len(processors[2].process_calls) == 0
 
 

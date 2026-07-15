@@ -109,6 +109,20 @@ class _ProcessingSnapshot:
     epoch: int
 
 
+@dataclass(frozen=True, slots=True)
+class _InferenceWork:
+    source: StreamSource
+    source_revision: int
+    frame: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class _DetectionOverlay:
+    results: tuple[DetectionResult, ...]
+    processing: _ProcessingSnapshot
+    source_revision: int
+
+
 def serialize_detection(result: DetectionResult) -> dict:
     payload = asdict(result)
     payload["has_plate"] = result.has_plate
@@ -139,6 +153,11 @@ class VideoStreamService:
         self._condition = threading.Condition(threading.RLock())
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._inference_thread: threading.Thread | None = None
+        self._pending_inference: _InferenceWork | None = None
+        self._detection_overlay: _DetectionOverlay | None = None
+        self._inference_tracker_processor: DetectionProcessor | None = None
+        self._inference_tracker_source_revision = -1
 
         self._requested_source: StreamSource | None = None
         self._source_revision = 0
@@ -170,20 +189,35 @@ class VideoStreamService:
             if self._thread and self._thread.is_alive():
                 return
             self._stop_event.clear()
+            self._pending_inference = None
+            inference_thread = None
+            if not self._inference_thread or not self._inference_thread.is_alive():
+                self._inference_thread = threading.Thread(
+                    target=self._run_inference,
+                    name="video-inference-worker",
+                    daemon=True,
+                )
+                inference_thread = self._inference_thread
             self._thread = threading.Thread(
                 target=self._run,
                 name="video-stream-worker",
                 daemon=True,
             )
+            if inference_thread is not None:
+                inference_thread.start()
             self._thread.start()
 
     def stop(self, timeout: float = 8.0) -> None:
         self._stop_event.set()
         with self._condition:
+            self._pending_inference = None
             self._condition.notify_all()
             thread = self._thread
-        if thread and thread.is_alive():
-            thread.join(timeout=timeout)
+            inference_thread = self._inference_thread
+        deadline = time.monotonic() + timeout
+        for worker in (thread, inference_thread):
+            if worker and worker.is_alive():
+                worker.join(timeout=max(0.0, deadline - time.monotonic()))
         with self._condition:
             self._connected = False
             self._message = "服务已停止"
@@ -430,12 +464,8 @@ class VideoStreamService:
         active_source: StreamSource | None = None
         frame_count = 0
         source_fps = 0.0
-        last_results: list[DetectionResult] = []
-        last_results_snapshot: _ProcessingSnapshot | None = None
 
         while not self._stop_event.is_set():
-            self._ensure_processor()
-
             with self._condition:
                 requested_revision = self._source_revision
                 requested_source = self._requested_source
@@ -449,11 +479,6 @@ class VideoStreamService:
                 active_source = requested_source
                 frame_count = 0
                 source_fps = 0.0
-                last_results = []
-                last_results_snapshot = None
-                active_processor = self._processing_snapshot().processor
-                if active_processor:
-                    active_processor.reset_tracking()
                 if active_source is not None:
                     capture = self._open_capture(active_source)
                     if capture is not None and self._is_local_file(active_source.url):
@@ -494,55 +519,16 @@ class VideoStreamService:
             annotated_snapshot: _ProcessingSnapshot | None = None
             processing = self._processing_snapshot()
             options = processing.options
-            processor = processing.processor
-            if (
-                processing.enabled
-                and processor is not None
-                and processor.is_initialized
-                and frame_count % options.frame_interval == 0
-            ):
-                try:
-                    processor.yolo_threshold = options.yolo_threshold
-                    processor.lpr_threshold = options.lpr_threshold
-                    candidate_frame, candidate_results = processor.process(
-                        frame,
-                        camera_id=active_source.name if active_source else "",
-                    )
-                    candidate_results = list(candidate_results)
-                    if self._publish_results(
-                        active_source,
-                        candidate_results,
-                        frame,
-                        processing,
-                    ):
-                        annotated = candidate_frame
-                        annotated_snapshot = processing
-                        last_results = candidate_results
-                        last_results_snapshot = processing
-                    else:
-                        annotated = frame
-                        last_results = []
-                        last_results_snapshot = None
-                except Exception as exc:
-                    self._set_detection_status(f"检测异常: {exc}")
-                    annotated = frame
-            elif processing.enabled and last_results_snapshot is not None:
-                if (
-                    last_results_snapshot is not None
-                    and self._same_processing_token(
-                        processing,
-                        last_results_snapshot,
-                    )
-                    and self._processing_snapshot_current(processing)
-                ):
-                    annotated = self._draw_cached_results(frame, last_results)
+            if processing.enabled:
+                if active_source is not None and frame_count % options.frame_interval == 0:
+                    self._submit_inference(active_source, local_revision, frame)
+                cached_results = self._cached_detection_results(
+                    processing,
+                    local_revision,
+                )
+                if cached_results is not None:
+                    annotated = self._draw_cached_results(frame, cached_results)
                     annotated_snapshot = processing
-                else:
-                    last_results = []
-                    last_results_snapshot = None
-            elif not processing.enabled:
-                last_results = []
-                last_results_snapshot = None
 
             if active_source is not None and self.frame_processor is not None:
                 try:
@@ -568,6 +554,134 @@ class VideoStreamService:
 
         if capture is not None:
             capture.release()
+
+    def _submit_inference(
+        self,
+        source: StreamSource,
+        source_revision: int,
+        frame: np.ndarray,
+    ) -> bool:
+        work = _InferenceWork(
+            source=source,
+            source_revision=source_revision,
+            frame=frame.copy(),
+        )
+        with self._condition:
+            if (
+                self._stop_event.is_set()
+                or not self._desired_processor_options.enabled
+                or source_revision != self._source_revision
+                or source != self._requested_source
+            ):
+                return False
+            self._pending_inference = work
+            self._condition.notify_all()
+            return True
+
+    def _run_inference(self) -> None:
+        while not self._stop_event.is_set():
+            with self._condition:
+                while (
+                    self._pending_inference is None
+                    and not self._stop_event.is_set()
+                ):
+                    self._condition.wait()
+                if self._stop_event.is_set():
+                    break
+                work = self._pending_inference
+                self._pending_inference = None
+            if work is not None:
+                self._process_inference_work(work)
+
+    def _process_inference_work(self, work: _InferenceWork) -> bool:
+        if not self._inference_work_current(work):
+            return False
+
+        self._ensure_processor()
+        with self._condition:
+            if self._pending_inference is not None:
+                work = self._pending_inference
+                self._pending_inference = None
+        processing = self._processing_snapshot()
+        processor = processing.processor
+        if (
+            not processing.enabled
+            or processor is None
+            or not processor.is_initialized
+            or not self._processing_snapshot_current(processing)
+            or not self._inference_work_current(work)
+        ):
+            return False
+
+        try:
+            if (
+                processor is not self._inference_tracker_processor
+                or work.source_revision != self._inference_tracker_source_revision
+            ):
+                processor.reset_tracking()
+                self._inference_tracker_processor = processor
+                self._inference_tracker_source_revision = work.source_revision
+            processor.yolo_threshold = processing.options.yolo_threshold
+            processor.lpr_threshold = processing.options.lpr_threshold
+            _, candidate_results = processor.process(
+                work.frame,
+                camera_id=work.source.name,
+            )
+            results = list(candidate_results)
+        except Exception as exc:
+            self._set_detection_status(f"检测异常: {exc}")
+            return False
+
+        if (
+            not self._processing_snapshot_current(processing)
+            or not self._inference_work_current(work)
+            or not self._publish_results(
+                work.source,
+                results,
+                work.frame,
+                processing,
+            )
+        ):
+            return False
+
+        with self._condition:
+            if (
+                work.source_revision != self._source_revision
+                or work.source != self._requested_source
+                or not self._processing_snapshot_current(processing)
+            ):
+                return False
+            self._detection_overlay = _DetectionOverlay(
+                results=tuple(results),
+                processing=processing,
+                source_revision=work.source_revision,
+            )
+            return True
+
+    def _inference_work_current(self, work: _InferenceWork) -> bool:
+        with self._condition:
+            return (
+                not self._stop_event.is_set()
+                and self._desired_processor_options.enabled
+                and work.source_revision == self._source_revision
+                and work.source == self._requested_source
+            )
+
+    def _cached_detection_results(
+        self,
+        processing: _ProcessingSnapshot,
+        source_revision: int,
+    ) -> list[DetectionResult] | None:
+        with self._condition:
+            overlay = self._detection_overlay
+            if (
+                overlay is None
+                or overlay.source_revision != source_revision
+                or not self._same_processing_token(processing, overlay.processing)
+                or not self._processing_snapshot_current(processing)
+            ):
+                return None
+            return list(overlay.results)
 
     def _advance_inference_epoch_locked(self) -> None:
         self._inference_epoch += 1

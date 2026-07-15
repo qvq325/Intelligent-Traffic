@@ -397,7 +397,7 @@ def test_frontend_shell_prevents_stale_asset_initialization_failure(client):
     app_js = client.get("/static/js/app.js").text
 
     assert index.headers["cache-control"] == "no-store"
-    assert "/static/js/app.js?v=20260714-6" in index.text
+    assert "/static/js/app.js?v=20260715-1" in index.text
     assert "/static/js/system-management.js?v=20260714-5" in index.text
     assert 'id="road-video-preview"' in index.text
     assert 'id="road-video-preview-status">实时</span>' in index.text

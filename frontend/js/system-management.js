@@ -1929,21 +1929,31 @@ async function probeStreamBatch() {
   if (!targetIds.length) return;
   state.probingStreams = new Set(targetIds);
   renderStreams();
+  let report = null;
+  let probeError = null;
   try {
-    const report = await request(
+    report = await request(
       "/streams/probe",
       jsonRequest("POST", { stream_ids: targetIds }),
     );
-    await loadStreams();
-    showStreamProbeReport(report);
-    notify(
-      `RTSP 探测完成：${report.succeeded || 0} 成功，${report.failed || 0} 失败`,
-      report.failed ? "error" : "success",
-    );
+  } catch (error) {
+    probeError = error;
   } finally {
     state.probingStreams.clear();
     renderStreams();
+    try {
+      await loadStreams();
+    } catch (refreshError) {
+      if (!probeError) throw refreshError;
+      notify(`RTSP 批量探测结果刷新失败：${errorDetail(refreshError)}`, "error");
+    }
   }
+  if (probeError) throw probeError;
+  showStreamProbeReport(report);
+  notify(
+    `RTSP 探测完成：${report.succeeded || 0} 成功，${report.failed || 0} 失败`,
+    report.failed ? "error" : "success",
+  );
 }
 
 function showStreamDeleteConflict(error) {
@@ -2013,12 +2023,29 @@ async function deleteStreamBatch() {
 }
 
 async function probeStream(streamId) {
-  await runMutation({
-    label: "RTSP 流探测",
-    execute: () => request(`/streams/${encodeURIComponent(streamId)}/probe`, { method: "POST" }),
-    refresh: ["streams", "runtime"],
-    onComplete: (result) => showReport("RTSP 流探测结果", result),
-  });
+  state.probingStreams.add(streamId);
+  renderStreams();
+  let probeError = null;
+  try {
+    await runMutation({
+      label: "RTSP 流探测",
+      execute: () => request(`/streams/${encodeURIComponent(streamId)}/probe`, { method: "POST" }),
+      refresh: ["runtime"],
+      onComplete: (result) => showReport("RTSP 流探测结果", result),
+    });
+  } catch (error) {
+    probeError = error;
+  } finally {
+    state.probingStreams.delete(streamId);
+    renderStreams();
+    try {
+      await loadStreams();
+    } catch (refreshError) {
+      if (!probeError) throw refreshError;
+      notify(`RTSP 探测结果刷新失败：${errorDetail(refreshError)}`, "error");
+    }
+  }
+  if (probeError) throw probeError;
 }
 
 async function deleteStream(stream) {

@@ -91,10 +91,13 @@ def test_realtime_monitor_has_no_duplicate_model_configuration_editor():
     assert 'id="yolo-threshold"' not in INDEX
     assert 'id="lpr-threshold"' not in INDEX
     assert 'id="detect-interval"' not in INDEX
-    assert 'id="detection-toggle"' not in INDEX
+    assert 'id="detection-toggle"' in INDEX
+    assert "<span>智能检测</span>" in INDEX
+    assert 'detectionToggle: $("#detection-toggle")' in APP_SCRIPT
+    assert "elements.detectionToggle.checked = Boolean(stream.detection.enabled)" in APP_SCRIPT
+    assert "api.updateDetection({ enabled: requestedEnabled })" in APP_SCRIPT
 
     for stale_binding in (
-        "detectionToggle:",
         "settingsForm:",
         "deviceSelect:",
         "yoloThreshold:",
@@ -138,3 +141,27 @@ def test_api_client_displays_structured_configuration_errors_first():
     assert structured in API_SCRIPT
     assert detail in API_SCRIPT
     assert API_SCRIPT.index(structured) < API_SCRIPT.index(detail)
+
+
+def test_single_stream_probe_refreshes_persisted_result_after_failure():
+    start = SCRIPT.index("async function probeStream(streamId) {")
+    end = SCRIPT.index("\nasync function deleteStream(", start)
+    probe_source = SCRIPT[start:end]
+
+    assert "state.probingStreams.add(streamId);" in probe_source
+    assert "probeError = error;" in probe_source
+    assert "finally {" in probe_source
+    cleanup = probe_source.split("finally {", maxsplit=1)[1]
+    assert "state.probingStreams.delete(streamId);" in cleanup
+    assert "await loadStreams();" in cleanup
+    assert "if (probeError) throw probeError;" in probe_source
+
+
+def test_batch_stream_probe_clears_pending_state_before_reloading_results():
+    start = SCRIPT.index("async function probeStreamBatch() {")
+    end = SCRIPT.index("\nfunction showStreamDeleteConflict(", start)
+    probe_source = SCRIPT[start:end]
+
+    clear_position = probe_source.index("state.probingStreams.clear();")
+    reload_position = probe_source.index("await loadStreams();")
+    assert clear_position < reload_position

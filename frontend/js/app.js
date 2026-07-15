@@ -32,6 +32,7 @@ const elements = {
   metricPlates: $("#metric-plates"),
   metricWhitelisted: $("#metric-whitelisted"),
   detectionStatus: $("#detection-status"),
+  detectionToggle: $("#detection-toggle"),
   singleMonitorLayout: $("#single-monitor-layout"),
   multiCameraWorkspace: $("#multi-camera-workspace"),
   multiCameraGrid: $("#multi-camera-grid"),
@@ -842,6 +843,7 @@ function renderStream(stream, { syncSettings = false } = {}) {
   elements.metricPlates.textContent = stream.metrics.plates;
   elements.metricWhitelisted.textContent = stream.metrics.whitelisted;
   elements.detectionStatus.textContent = stream.detection.status;
+  elements.detectionToggle.checked = Boolean(stream.detection.enabled);
 
   renderResults(stream.results);
 }
@@ -2810,6 +2812,20 @@ function bindEvents() {
     const link = document.createElement("a");
     link.href = "/api/video/snapshot";
     link.click();
+  });
+  elements.detectionToggle.addEventListener("change", async () => {
+    const requestedEnabled = elements.detectionToggle.checked;
+    elements.detectionToggle.disabled = true;
+    try {
+      const detection = await api.updateDetection({ enabled: requestedEnabled });
+      elements.detectionToggle.checked = Boolean(detection.enabled);
+      elements.detectionStatus.textContent = detection.status;
+    } catch (error) {
+      elements.detectionToggle.checked = !requestedEnabled;
+      reportError(error);
+    } finally {
+      elements.detectionToggle.disabled = false;
+    }
   });
   elements.whitelistForm.addEventListener("submit", (event) => saveWhitelistEntry(event).catch(reportError));
   elements.whitelistToggle.addEventListener("change", async () => {

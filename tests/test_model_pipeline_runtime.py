@@ -413,7 +413,7 @@ def test_box_plate_recognizer_default_detector_uses_runtime_options(
 ):
     import trained_plate_recognizer as trained_module
 
-    calls = {}
+    calls = {"predict": []}
     model_path = tmp_path / "plate.pt"
     model_path.write_bytes(b"trusted")
 
@@ -421,10 +421,9 @@ def test_box_plate_recognizer_default_detector_uses_runtime_options(
         def __init__(self, path):
             calls["model_path"] = path
 
-        def predict(self, frame, **kwargs):
-            calls["frame"] = frame
-            calls["predict_kwargs"] = kwargs
-            return [SimpleNamespace(boxes=[])]
+        def predict(self, frames, **kwargs):
+            calls["predict"].append((frames, kwargs))
+            return [SimpleNamespace(boxes=[]) for _frame in frames]
 
     class OCRDouble:
         def recognize_crops(self, crops, bboxes):
@@ -441,10 +440,22 @@ def test_box_plate_recognizer_default_detector_uses_runtime_options(
     frame = np.zeros((4, 6, 3), dtype=np.uint8)
 
     assert recognizer.recognize(frame) == []
+    assert recognizer.detector.detect_batch(
+        [frame, frame], conf_threshold=0.12
+    ) == [[], []]
     assert calls["model_path"] == str(model_path)
-    assert calls["frame"] is frame
-    assert calls["predict_kwargs"] == {
+    assert len(calls["predict"][0][0]) == 1
+    assert calls["predict"][0][0][0] is frame
+    assert calls["predict"][0][1] == {
         "conf": 0.37,
+        "device": "cpu",
+        "imgsz": 768,
+        "verbose": False,
+    }
+    assert len(calls["predict"][1][0]) == 2
+    assert all(item is frame for item in calls["predict"][1][0])
+    assert calls["predict"][1][1] == {
+        "conf": 0.12,
         "device": "cpu",
         "imgsz": 768,
         "verbose": False,

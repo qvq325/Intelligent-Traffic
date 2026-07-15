@@ -54,6 +54,26 @@ def draw_vehicle_box(
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
 
     if label:
+        if HAS_PIL and not label.isascii():
+            font_size = 16
+            padding = 2
+            label_height = font_size + padding * 2
+            label_y = y1 - label_height - 4
+            if label_y < 0:
+                label_y = min(
+                    y2 + 4,
+                    max(0, frame.shape[0] - label_height),
+                )
+            _draw_text_pil(
+                frame,
+                label,
+                (x1, label_y),
+                color,
+                font_size=font_size,
+                padding=padding,
+            )
+            return
+
         # 文字背景
         (tw, th), baseline = cv2.getTextSize(
             label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1

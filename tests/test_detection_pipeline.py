@@ -1,10 +1,108 @@
 import torch
 import pytest
+import numpy as np
 from types import SimpleNamespace
 
 from detection_processor import DetectionProcessor
 from lpr_recognizer import LPRRecognizer, PLATE_CHARACTERS, PlateRecognition
 from traffic_map import TrafficMapModel
+from vehicle_detector import VehicleDetection
+from whitelist_manager import WhitelistManager
+
+
+def ready_processor(vehicle_detector, recognizer, mode):
+    processor = object.__new__(DetectionProcessor)
+    processor._initialized = True
+    processor._lpr_mode = mode
+    processor.vehicle_detector = vehicle_detector
+    processor.lpr_recognizer = recognizer
+    processor.whitelist_manager = WhitelistManager()
+    processor.total_frames_processed = 0
+    processor.total_vehicles_detected = 0
+    processor.total_plates_recognized = 0
+    return processor
+
+
+class VehicleDetectorDouble:
+    def __init__(self):
+        self.reset_calls = 0
+
+    def detect(self, _frame, tracker_key="default"):
+        assert tracker_key == "camera-a"
+        return [
+            VehicleDetection(
+                bbox=(10, 10, 110, 80),
+                confidence=0.9,
+                class_id=2,
+                class_name="car",
+                class_name_cn="小汽车",
+                track_id=7,
+            )
+        ]
+
+    def reset_tracking(self):
+        self.reset_calls += 1
+
+
+class BoxRecognizerDouble:
+    def __init__(self):
+        self.calls = []
+        self.reset_calls = 0
+
+    def recognize_for_vehicles(self, frame, vehicles, *, camera_id):
+        self.calls.append((frame, list(vehicles), camera_id))
+        return [
+            PlateRecognition(
+                "京A12345",
+                0.9,
+                (30, 50, 80, 65),
+                "蓝色",
+            )
+        ]
+
+    def recognize(self, _frame):
+        raise AssertionError("box mode must use vehicle-aware recognition")
+
+    def reset(self):
+        self.reset_calls += 1
+
+
+def test_box_mode_receives_tracked_vehicle_regions_and_camera_id():
+    vehicle_detector = VehicleDetectorDouble()
+    recognizer = BoxRecognizerDouble()
+    processor = ready_processor(vehicle_detector, recognizer, "box")
+    frame = np.zeros((100, 120, 3), dtype=np.uint8)
+    _, results = processor.process(frame, camera_id="camera-a")
+    assert recognizer.calls[0][2] == "camera-a"
+    assert recognizer.calls[0][1][0].track_id == 7
+    assert results[0].plate_text == "京A12345"
+
+
+def test_pose_mode_keeps_existing_full_frame_recognition():
+    class PoseRecognizerDouble:
+        def __init__(self):
+            self.calls = 0
+
+        def recognize(self, _frame):
+            self.calls += 1
+            return []
+
+    recognizer = PoseRecognizerDouble()
+    processor = ready_processor(VehicleDetectorDouble(), recognizer, "pose")
+    processor.process(
+        np.zeros((100, 120, 3), dtype=np.uint8),
+        camera_id="camera-a",
+    )
+    assert recognizer.calls == 1
+
+
+def test_tracking_reset_also_resets_trained_plate_fusion():
+    vehicle_detector = VehicleDetectorDouble()
+    recognizer = BoxRecognizerDouble()
+    processor = ready_processor(vehicle_detector, recognizer, "box")
+    processor.reset_tracking()
+    assert vehicle_detector.reset_calls == 1
+    assert recognizer.reset_calls == 1
 
 
 def test_ctc_decode_collapses_blanks_and_repeated_characters():

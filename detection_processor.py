@@ -11,6 +11,7 @@ from typing import List, Optional, Tuple
 
 from vehicle_detector import VehicleDetector, VehicleDetection, HAS_YOLO
 from lpr_recognizer import LPRRecognizer, PlateRecognition, HAS_PLATE_RECOGNIZER
+from plate_temporal_fusion import TrackedVehicle
 from trained_plate_recognizer import BoxPlateRecognizer
 from whitelist_manager import WhitelistManager, MatchResult
 from draw_utils import (
@@ -315,8 +316,25 @@ class DetectionProcessor:
         vehicles = self.vehicle_detector.detect(frame, tracker_key=camera_id or "default")
         self.total_vehicles_detected += len(vehicles)
 
-        # ---- Step 2: 整帧只运行一次车牌模型，再按空间位置关联车辆 ----
-        plates = self.lpr_recognizer.recognize(frame) if self.lpr_recognizer else []
+        # ---- Step 2: 训练后 box 模式按车辆补检并融合，pose 模式保持全帧识别 ----
+        if self.lpr_recognizer is None:
+            plates = []
+        elif self._lpr_mode == "box":
+            tracked = [
+                TrackedVehicle(
+                    bbox=vehicle.bbox,
+                    track_id=vehicle.track_id,
+                    confidence=vehicle.confidence,
+                )
+                for vehicle in vehicles
+            ]
+            plates = self.lpr_recognizer.recognize_for_vehicles(
+                frame,
+                tracked,
+                camera_id=camera_id or "default",
+            )
+        else:
+            plates = self.lpr_recognizer.recognize(frame)
 
         # ---- Step 3: 车辆与车牌关联 + 白名单匹配 ----
         for vehicle in vehicles:
@@ -389,6 +407,12 @@ class DetectionProcessor:
         """Reset camera-local tracking without reloading inference weights."""
         if self.vehicle_detector:
             self.vehicle_detector.reset_tracking()
+        if (
+            self._lpr_mode == "box"
+            and self.lpr_recognizer
+            and hasattr(self.lpr_recognizer, "reset")
+        ):
+            self.lpr_recognizer.reset()
 
     @staticmethod
     def _plate_belongs_to_vehicle(

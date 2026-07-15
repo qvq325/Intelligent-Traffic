@@ -466,7 +466,7 @@ def test_application_state_constructs_all_streams_with_fixed_scene_keys(
     monkeypatch,
     tmp_path,
 ):
-    constructed_scene_keys = []
+    constructed_streams = []
 
     class TrafficMapDouble:
         def __init__(self, *_args):
@@ -483,9 +483,15 @@ def test_application_state_constructs_all_streams_with_fixed_scene_keys(
             return frame
 
     class StreamDouble:
-        def __init__(self, *_args, scene_key="realtime", **_kwargs):
+        def __init__(
+            self,
+            *_args,
+            scene_key="realtime",
+            external_inference=False,
+            **_kwargs,
+        ):
             self.scene_key = scene_key
-            constructed_scene_keys.append(scene_key)
+            constructed_streams.append((scene_key, bool(external_inference)))
 
         def update_detection_settings(self, **_settings):
             pass
@@ -513,12 +519,40 @@ def test_application_state_constructs_all_streams_with_fixed_scene_keys(
 
     ApplicationState(config)
 
-    assert constructed_scene_keys == [
-        "realtime",
-        "traffic_map",
-        "no_parking",
-        "road_abnormal",
+    assert constructed_streams == [
+        ("realtime", False),
+        ("traffic_map", False),
+        ("no_parking", False),
+        ("road_abnormal", True),
     ]
+
+
+def test_road_activation_does_not_override_pipeline_enabled_setting():
+    selected = []
+
+    class RoadVideoDouble:
+        def select_source(self, source_id, name, url):
+            selected.append((source_id, name, url))
+
+        def update_detection_settings(self, **settings):
+            raise AssertionError(f"road activation overrode pipeline: {settings}")
+
+    state = object.__new__(ApplicationState)
+    state.road_abnormal_video = RoadVideoDouble()
+    state.road_abnormal = SimpleNamespace(
+        get_scene=lambda _scene_id: {"scene_id": "road-1"},
+        start=lambda scene_id: {"active_scene_id": scene_id},
+    )
+    result = state.activate_scene_runtime(
+        {
+            "scene_id": "road-1",
+            "scene_type": "road_abnormal",
+            "camera_id": "camera-a",
+        },
+        "road.mp4",
+    )
+    assert selected == [("camera-a", "camera-a", "road.mp4")]
+    assert result == {"active_scene_id": "road-1"}
 
 
 def test_application_state_resolves_all_pipeline_rows_before_matching_services():

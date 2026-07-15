@@ -93,6 +93,7 @@ class ApplicationState:
             self.whitelist,
             frame_processor=self.road_abnormal.process_frame,
             scene_key="road_abnormal",
+            external_inference=True,
         )
         for stream in (
             self.video,
@@ -101,7 +102,6 @@ class ApplicationState:
             self.road_abnormal_video,
         ):
             stream.update_detection_settings(device=default_device)
-        self.road_abnormal_video.update_detection_settings(enabled=False)
         self.device_monitor = DeviceMonitor(
             stream_status_providers={
                 "realtime": self.video.status,
@@ -757,7 +757,6 @@ class ApplicationState:
             self.no_parking_video.update_detection_settings(enabled=True)
             return self.no_parking.start(scene["scene_id"])
         self.road_abnormal_video.select_source(scene["camera_id"], scene["camera_id"], stream_url)
-        self.road_abnormal_video.update_detection_settings(enabled=False)
         return self.road_abnormal.start(scene["scene_id"])
 
     def start_legacy_scene(self, scene_type: str, scene_id: str) -> dict:

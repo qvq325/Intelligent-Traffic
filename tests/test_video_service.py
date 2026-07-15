@@ -913,3 +913,80 @@ def test_malformed_replacement_is_rejected_before_swap_and_not_retried():
     assert str(replacement.vehicle_model_path).casefold() not in repr(status).casefold()
     service._ensure_processor()
     assert factory_calls == [1, 2]
+
+
+def test_external_inference_stores_pipeline_metadata_without_loading_processor():
+    factory_calls = []
+
+    def forbidden_factory(options):
+        factory_calls.append(options)
+        raise AssertionError("external inference must not load DetectionProcessor")
+
+    service = VideoStreamService(
+        WhitelistManager(),
+        scene_key="road_abnormal",
+        processor_factory=forbidden_factory,
+        external_inference=True,
+    )
+    service.apply_model_pipeline_options(
+        _pipeline_options("road_abnormal", preset="trained")
+    )
+    service._ensure_processor()
+    status = service.status()["detection"]
+    assert factory_calls == []
+    assert status["enabled"] is True
+    assert status["preset"] == "trained"
+    assert status["status"] == "由场景分析器处理"
+
+
+def test_frame_processor_receives_pristine_pixels_before_cached_detection_overlay():
+    observed = []
+
+    def frame_processor(_camera_id, frame):
+        assert np.all(frame == 5)
+        observed.append(int(frame[0, 0, 0]))
+        return np.full_like(frame, 15)
+
+    service = VideoStreamService(
+        WhitelistManager(),
+        frame_processor=frame_processor,
+        processor_factory=lambda _options: _ProcessorDouble(),
+    )
+    service.apply_model_pipeline_options(_pipeline_options())
+    service._ensure_processor()
+    service._cached_detection_results = lambda _snapshot, _revision: []
+    drawn_inputs = []
+    service._draw_cached_results = lambda frame, _results: (
+        drawn_inputs.append(int(frame[0, 0, 0]))
+        or np.full_like(frame, 25)
+    )
+    source = video_stream_module.StreamSource(
+        "id",
+        "camera-a",
+        "camera-a",
+        "test",
+    )
+    annotated, _snapshot = service._compose_frame(
+        source,
+        1,
+        np.full((4, 4, 3), 5, dtype=np.uint8),
+        service._processing_snapshot(),
+    )
+    assert observed == [5]
+    assert drawn_inputs == [15]
+    assert int(annotated[0, 0, 0]) == 25
+
+
+def test_external_inference_status_distinguishes_disabled_and_scene_owned():
+    service = VideoStreamService(
+        WhitelistManager(),
+        scene_key="road_abnormal",
+        external_inference=True,
+    )
+    enabled = _pipeline_options("road_abnormal", preset="trained")
+    service.apply_model_pipeline_options(enabled)
+    assert service.status()["detection"]["status"] == "由场景分析器处理"
+    service.apply_model_pipeline_options(
+        replace(enabled, enabled=False, revision=2)
+    )
+    assert service.status()["detection"]["status"] == "未启用"

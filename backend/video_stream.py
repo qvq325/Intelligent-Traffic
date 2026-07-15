@@ -140,6 +140,7 @@ class VideoStreamService:
         *,
         scene_key: str = "realtime",
         processor_factory: ProcessorFactory | None = None,
+        external_inference: bool = False,
     ) -> None:
         if not scene_key:
             raise ValueError("scene_key must not be empty")
@@ -148,6 +149,7 @@ class VideoStreamService:
         self.frame_processor = frame_processor
         self.scene_key = scene_key
         self._processor_factory = processor_factory or _default_processor_factory
+        self._external_inference = bool(external_inference)
         self._detection_listeners: list[DetectionCallback] = []
 
         self._condition = threading.Condition(threading.RLock())
@@ -333,6 +335,8 @@ class VideoStreamService:
             if not updated.enabled:
                 self._detection_status = "未启用"
                 self._results = []
+            elif self._external_inference:
+                self._detection_status = "由场景分析器处理"
             elif (
                 self._processor is None
                 or self._active_processor_generation
@@ -366,6 +370,8 @@ class VideoStreamService:
             if not options.enabled:
                 self._detection_status = "未启用"
                 self._results = []
+            elif self._external_inference:
+                self._detection_status = "由场景分析器处理"
             else:
                 self._detection_status = "等待加载模型"
             self._condition.notify_all()
@@ -515,26 +521,20 @@ class VideoStreamService:
                 continue
 
             frame_count += 1
-            annotated = frame
-            annotated_snapshot: _ProcessingSnapshot | None = None
             processing = self._processing_snapshot()
             options = processing.options
-            if processing.enabled:
-                if active_source is not None and frame_count % options.frame_interval == 0:
+            if active_source is not None:
+                if processing.enabled and frame_count % options.frame_interval == 0:
                     self._submit_inference(active_source, local_revision, frame)
-                cached_results = self._cached_detection_results(
-                    processing,
+                annotated, annotated_snapshot = self._compose_frame(
+                    active_source,
                     local_revision,
+                    frame,
+                    processing,
                 )
-                if cached_results is not None:
-                    annotated = self._draw_cached_results(frame, cached_results)
-                    annotated_snapshot = processing
-
-            if active_source is not None and self.frame_processor is not None:
-                try:
-                    annotated = self.frame_processor(active_source.name, annotated)
-                except Exception as exc:
-                    self._set_detection_status(f"画面分析异常: {exc}")
+            else:
+                annotated = frame
+                annotated_snapshot = None
 
             if (
                 annotated_snapshot is not None
@@ -555,12 +555,40 @@ class VideoStreamService:
         if capture is not None:
             capture.release()
 
+    def _compose_frame(
+        self,
+        source: StreamSource,
+        source_revision: int,
+        frame: np.ndarray,
+        processing: _ProcessingSnapshot,
+    ) -> tuple[np.ndarray, _ProcessingSnapshot | None]:
+        annotated = frame
+        if self.frame_processor is not None:
+            try:
+                annotated = self.frame_processor(source.name, frame)
+            except Exception as exc:
+                self._set_detection_status(f"画面分析异常: {exc}")
+                return frame, None
+
+        annotated_snapshot = None
+        if processing.enabled:
+            cached_results = self._cached_detection_results(
+                processing,
+                source_revision,
+            )
+            if cached_results is not None:
+                annotated = self._draw_cached_results(annotated, cached_results)
+                annotated_snapshot = processing
+        return annotated, annotated_snapshot
+
     def _submit_inference(
         self,
         source: StreamSource,
         source_revision: int,
         frame: np.ndarray,
     ) -> bool:
+        if self._external_inference:
+            return False
         work = _InferenceWork(
             source=source,
             source_revision=source_revision,
@@ -698,7 +726,7 @@ class VideoStreamService:
                 if generation != self._desired_processor_generation:
                     options = self._active_processor_options
             return _ProcessingSnapshot(
-                enabled=desired.enabled,
+                enabled=desired.enabled and not self._external_inference,
                 options=options,
                 processor=processor,
                 generation=generation,
@@ -738,6 +766,8 @@ class VideoStreamService:
 
     def _ensure_processor(self) -> None:
         with self._condition:
+            if self._external_inference:
+                return
             options = self._desired_processor_options
             generation = self._desired_processor_generation
             if not options.enabled:

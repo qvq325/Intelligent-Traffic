@@ -6,6 +6,7 @@ import threading
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from backend.model_pipelines import ModelPipelineOptions
 from backend.road_abnormal import RoadAbnormalMonitor, RoadObjectDetector
@@ -1403,6 +1404,7 @@ def test_headless_trained_mog_supports_multiple_rois_overlap_and_reset():
 
     assert alerts
     assert isinstance(alerts[0], TrainedMOGAlert)
+    assert alerts[0].observed_duration > 0
     x, y, width, height = alerts[0].position
     assert x >= 65
     assert y >= 10
@@ -1421,3 +1423,24 @@ def test_headless_trained_mog_supports_multiple_rois_overlap_and_reset():
             frame_id=frame_id,
             timestamp=frame_id * 0.1,
         ) == []
+
+
+def test_trained_mog_observation_duration_is_not_counted_twice(tmp_path):
+    monitor = _monitor(tmp_path)
+    reference = monitor.capture_reference(b"jpeg", "camera", 100, 100)
+    scene = monitor.upsert_scene(
+        _scene_payload(
+            reference,
+            camera_id="camera",
+            persistence_seconds=3.0,
+        )
+    )
+    monitor.start(scene["scene_id"])
+    events = monitor.update_candidates(
+        "camera",
+        [_candidate(source="MOG", observed_duration=3.2)],
+        (100, 100),
+        now=10.0,
+    )
+    assert len(events) == 1
+    assert events[0]["first_seen"] == pytest.approx(6.8)

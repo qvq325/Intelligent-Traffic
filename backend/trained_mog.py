@@ -27,6 +27,7 @@ class TrainedMOGAlert:
     alert_time: float
     confidence: float = 0.5
     frame_id: int = 0
+    observed_duration: float = 0.0
 
 
 @dataclass(slots=True)
@@ -300,6 +301,7 @@ class MOGAnomalyEngine:
                     alert_time=observed_at,
                     confidence=self._confidence(tracked),
                     frame_id=int(frame_id),
+                    observed_duration=tracked.duration,
                 )
             )
         return list(self.alerts)

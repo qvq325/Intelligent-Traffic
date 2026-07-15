@@ -750,6 +750,14 @@ class RoadAbnormalMonitor:
                 if zone is None:
                     continue
                 source = str(candidate.get("source", "MOG2"))
+                observed_duration = (
+                    max(
+                        0.0,
+                        float(candidate.get("observed_duration", 0.0)),
+                    )
+                    if source == "MOG"
+                    else 0.0
+                )
                 class_name = str(candidate.get("class_name", "unknown"))
                 track_id = int(candidate.get("track_id", -1))
                 state = None
@@ -773,15 +781,17 @@ class RoadAbnormalMonitor:
                         class_name_cn=str(candidate.get("class_name_cn", "未知障碍物")),
                         confidence=float(candidate.get("confidence", 0.5)),
                         bbox=bbox,
-                        first_seen=observed_at,
+                        first_seen=observed_at - observed_duration,
                         last_seen=observed_at,
+                        duration_seconds=observed_duration,
                     )
                     self._candidates[state.candidate_id] = state
                 else:
                     gap = max(0.0, observed_at - state.last_seen)
                     if gap > scene.lost_tolerance_seconds:
                         changed = self._close_event(state, state.last_seen) or changed
-                        state.first_seen = observed_at
+                        state.first_seen = observed_at - observed_duration
+                        state.duration_seconds = observed_duration
                         state.event_id = ""
                     state.last_seen = observed_at
                     state.duration_seconds = max(0.0, observed_at - state.first_seen)
@@ -1013,12 +1023,20 @@ class RoadAbnormalMonitor:
                 position = alert.get("position", ())
                 anomaly_type = str(alert.get("anomaly_type", "unknown_obstacle"))
                 confidence = float(alert.get("confidence", 0.5))
+                observed_duration = max(
+                    0.0,
+                    float(alert.get("observed_duration", 0.0)),
+                )
             else:
                 position = getattr(alert, "position", ())
                 anomaly_type = str(
                     getattr(alert, "anomaly_type", "unknown_obstacle")
                 )
                 confidence = float(getattr(alert, "confidence", 0.5))
+                observed_duration = max(
+                    0.0,
+                    float(getattr(alert, "observed_duration", 0.0)),
+                )
             if len(position) != 4:
                 continue
             x, y, box_width, box_height = (float(value) for value in position)
@@ -1031,6 +1049,7 @@ class RoadAbnormalMonitor:
                     "confidence": confidence,
                     "bbox": (x, y, x + box_width, y + box_height),
                     "track_id": -1,
+                    "observed_duration": observed_duration,
                 }
             )
         return candidates, next_frame_count

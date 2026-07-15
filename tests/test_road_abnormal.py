@@ -1,3 +1,4 @@
+from collections import deque
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -51,6 +52,39 @@ class FakeMogEngine:
                 frame_id=frame_id,
             )
         ]
+
+
+class SequencedDetector:
+    def __init__(self, responses):
+        self.responses = deque(responses)
+        self.calls = []
+
+    def prepare(self):
+        return self
+
+    def detect(self, frame, threshold):
+        self.calls.append((frame.copy(), threshold))
+        response = self.responses.popleft() if self.responses else []
+        if isinstance(response, Exception):
+            raise response
+        return [dict(item) for item in response]
+
+
+class SequencedMog:
+    def __init__(self, alerts):
+        self.alerts = list(alerts)
+        self.process_calls = []
+        self.reset_calls = 0
+
+    def reset(self):
+        self.reset_calls += 1
+
+    def set_rois(self, _polygons):
+        return None
+
+    def process(self, frame, yolo_boxes, frame_id=0, timestamp=None):
+        self.process_calls.append((frame.copy(), list(yolo_boxes), frame_id))
+        return list(self.alerts)
 
 
 def _scene_payload(reference, **overrides):
@@ -124,6 +158,42 @@ def _trained_options(tmp_path):
         plate_mode="box",
         no_parking_mode="stationary",
         road_abnormal_mode="mog",
+    )
+
+
+def trained_monitor(
+    tmp_path,
+    detector,
+    mog,
+    *,
+    options=None,
+    scene_overrides=None,
+):
+    monitor = RoadAbnormalMonitor(
+        tmp_path / "road-abnormal",
+        tmp_path / "legacy.pt",
+        detector=FakeDetector(),
+        detector_factory=lambda _path, _device, _size: detector,
+        mog_factory=lambda **_kwargs: mog,
+    )
+    monitor.apply_model_pipeline_options(options or _trained_options(tmp_path))
+    reference = monitor.capture_reference(b"jpeg", "camera", 100, 100)
+    payload = _scene_payload(reference, camera_id="camera")
+    payload.update(scene_overrides or {})
+    scene = monitor.upsert_scene(payload)
+    monitor.start(scene["scene_id"])
+    return monitor
+
+
+def mog_alert(x=30):
+    return SimpleNamespace(
+        anomaly_type="medium_object",
+        position=(x, 30, 20, 20),
+        lane="middle",
+        alert_time=0.0,
+        confidence=0.88,
+        frame_id=0,
+        observed_duration=0.2,
     )
 
 
@@ -324,7 +394,7 @@ def test_scene_validation_rejects_invalid_roi(tmp_path):
 
 def test_trained_mode_delegates_to_injected_mog_and_keeps_event_payload(tmp_path):
     normal_vehicle = {
-        "bbox": (25, 25, 55, 55),
+        "bbox": (10, 10, 20, 20),
         "class_name": "car",
         "class_name_cn": "小汽车",
         "confidence": 0.95,
@@ -1206,7 +1276,7 @@ def test_process_frame_error_status_redacts_exception_details(tmp_path):
     monitor.process_frame("camera", np.zeros((100, 100, 3), dtype=np.uint8))
 
     error = monitor.status()["last_error"]
-    assert error == "道路异常检测失败: RuntimeError"
+    assert error == "道路目标检测降级: RuntimeError"
     assert str(secret_path) not in error
 
 
@@ -1444,3 +1514,123 @@ def test_trained_mog_observation_duration_is_not_counted_twice(tmp_path):
     )
     assert len(events) == 1
     assert events[0]["first_seen"] == pytest.approx(6.8)
+
+
+def test_trained_pipeline_uses_model_interval_and_threshold_not_legacy_scene_values(
+    tmp_path,
+):
+    detector = SequencedDetector([[], []])
+    mog = SequencedMog([])
+    options = replace(
+        _trained_options(tmp_path),
+        frame_interval=3,
+        yolo_threshold=0.37,
+    )
+    monitor = trained_monitor(
+        tmp_path,
+        detector,
+        mog,
+        options=options,
+        scene_overrides={"inference_interval": 1, "yolo_threshold": 0.91},
+    )
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    for frame_index in range(4):
+        monitor.process_frame("camera", frame, now=float(frame_index))
+    assert [threshold for _frame, threshold in detector.calls] == [0.37, 0.37]
+
+
+def test_stale_yolo_result_triggers_one_shared_current_frame_verification(
+    tmp_path,
+):
+    detector = SequencedDetector([[], []])
+    mog = SequencedMog([mog_alert(25), mog_alert(60)])
+    options = replace(_trained_options(tmp_path), frame_interval=10)
+    monitor = trained_monitor(tmp_path, detector, mog, options=options)
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    for frame_index in range(4):
+        monitor.process_frame("camera", frame, now=float(frame_index))
+    assert len(detector.calls) == 2
+
+
+def test_current_normal_vehicle_filters_mog_candidate_by_coverage_or_center(
+    tmp_path,
+):
+    normal = {
+        "bbox": (25, 25, 55, 55),
+        "class_name": "car",
+        "class_name_cn": "小汽车",
+        "confidence": 0.95,
+        "track_id": -1,
+    }
+    monitor = trained_monitor(
+        tmp_path,
+        SequencedDetector([[normal]]),
+        SequencedMog([mog_alert()]),
+    )
+    monitor.process_frame(
+        "camera",
+        np.zeros((100, 100, 3), dtype=np.uint8),
+        now=1.0,
+    )
+    assert monitor.status()["candidates"] == []
+
+
+def test_current_known_anomaly_replaces_overlapping_unclassified_mog_candidate(
+    tmp_path,
+):
+    person = {
+        "bbox": (25, 25, 55, 55),
+        "class_name": "person",
+        "class_name_cn": "行人",
+        "confidence": 0.91,
+        "track_id": 7,
+    }
+    monitor = trained_monitor(
+        tmp_path,
+        SequencedDetector([[person]]),
+        SequencedMog([mog_alert()]),
+    )
+    monitor.process_frame(
+        "camera",
+        np.zeros((100, 100, 3), dtype=np.uint8),
+        now=1.0,
+    )
+    assert {
+        item["source"] for item in monitor.status()["candidates"]
+    } == {"YOLO"}
+
+
+def test_verification_failure_keeps_mog_candidate_and_reports_degraded_status(
+    tmp_path,
+):
+    detector = SequencedDetector(
+        [[], RuntimeError("secret detector detail")]
+    )
+    options = replace(_trained_options(tmp_path), frame_interval=10)
+    monitor = trained_monitor(
+        tmp_path,
+        detector,
+        SequencedMog([mog_alert()]),
+        options=options,
+    )
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    for frame_index in range(4):
+        monitor.process_frame("camera", frame, now=float(frame_index))
+    status = monitor.status()
+    assert any(item["source"] == "MOG" for item in status["candidates"])
+    assert status["last_error"] == "道路目标检测降级: RuntimeError"
+    assert "secret" not in status["last_error"]
+
+
+def test_disabled_pipeline_publishes_frame_without_yolo_or_mog_calls(tmp_path):
+    detector = SequencedDetector([[]])
+    mog = SequencedMog([mog_alert()])
+    options = replace(_trained_options(tmp_path), enabled=False)
+    monitor = trained_monitor(tmp_path, detector, mog, options=options)
+    before_detector = len(detector.calls)
+    before_mog = len(mog.process_calls)
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    returned = monitor.process_frame("camera", frame, now=1.0)
+    assert returned is frame
+    assert len(detector.calls) == before_detector
+    assert len(mog.process_calls) == before_mog

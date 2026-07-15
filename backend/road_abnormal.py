@@ -226,6 +226,7 @@ class RoadAbnormalMonitor:
         self._background = None
         self._frame_count = 0
         self._known_objects: list[dict] = []
+        self._known_objects_frame = -1
         self._load()
 
     @staticmethod
@@ -350,6 +351,7 @@ class RoadAbnormalMonitor:
             self._background = prepared_background
             self._frame_count = 0
             self._known_objects = []
+            self._known_objects_frame = -1
             self._runtime_generation += 1
             self._last_error = ""
         if changed:
@@ -614,6 +616,7 @@ class RoadAbnormalMonitor:
         self._candidates.clear()
         self._frame_count = 0
         self._known_objects = []
+        self._known_objects_frame = -1
         self._runtime_generation += 1
         self._last_error = ""
         self._background = prepared_background
@@ -1068,6 +1071,50 @@ class RoadAbnormalMonitor:
             if item.get("class_name") in scene.anomaly_classes
         ]
 
+    @staticmethod
+    def _candidate_is_covered(
+        candidate_bbox: BBox,
+        object_bbox: BBox,
+    ) -> bool:
+        left = max(candidate_bbox[0], object_bbox[0])
+        top = max(candidate_bbox[1], object_bbox[1])
+        right = min(candidate_bbox[2], object_bbox[2])
+        bottom = min(candidate_bbox[3], object_bbox[3])
+        intersection = max(0.0, right - left) * max(0.0, bottom - top)
+        candidate_area = max(
+            1.0,
+            (candidate_bbox[2] - candidate_bbox[0])
+            * (candidate_bbox[3] - candidate_bbox[1]),
+        )
+        center = (
+            (candidate_bbox[0] + candidate_bbox[2]) / 2.0,
+            (candidate_bbox[1] + candidate_bbox[3]) / 2.0,
+        )
+        return (
+            intersection / candidate_area > 0.5
+            or object_bbox[0] <= center[0] <= object_bbox[2]
+            and object_bbox[1] <= center[1] <= object_bbox[3]
+        )
+
+    @classmethod
+    def _mog_candidates_not_covered_by_known_objects(
+        cls,
+        candidates: Iterable[dict],
+        objects: Iterable[dict],
+    ) -> list[dict]:
+        object_boxes = [tuple(item["bbox"]) for item in objects]
+        return [
+            candidate
+            for candidate in candidates
+            if not any(
+                cls._candidate_is_covered(
+                    tuple(candidate["bbox"]),
+                    object_bbox,
+                )
+                for object_bbox in object_boxes
+            )
+        ]
+
     def process_frame(
         self, camera_id: str, frame: np.ndarray, now: float | None = None
     ) -> np.ndarray:
@@ -1078,6 +1125,21 @@ class RoadAbnormalMonitor:
             if not self._running or scene is None or scene.camera_id != camera_id:
                 return frame
             generation = self._runtime_generation
+            options = self._pipeline_options
+
+        pipeline_enabled = options.enabled if options is not None else True
+        if not pipeline_enabled:
+            return frame
+        detector_interval = (
+            options.frame_interval
+            if options is not None
+            else scene.inference_interval
+        )
+        detector_threshold = (
+            options.yolo_threshold
+            if options is not None
+            else scene.yolo_threshold
+        )
 
         pending_candidate_io: list = []
         overlay_candidates: list[dict] = []
@@ -1096,13 +1158,22 @@ class RoadAbnormalMonitor:
                 road_abnormal_mode = self._road_abnormal_mode
                 frame_count = self._frame_count
                 known_objects = [dict(item) for item in self._known_objects]
+                known_objects_frame = self._known_objects_frame
 
-            inference_error = ""
-            next_frame_count = frame_count
-            combined_candidates: list[dict] = []
+            detector_error = ""
+            mog_error = ""
+            detected_this_frame = False
+            if frame_count % detector_interval == 0:
+                try:
+                    known_objects = detector.detect(frame, detector_threshold)
+                    known_objects_frame = frame_count
+                    detected_this_frame = True
+                except Exception as exc:
+                    detector_error = (
+                        "道路目标检测降级: " + type(exc).__name__
+                    )
+
             try:
-                if frame_count % scene.inference_interval == 0:
-                    known_objects = detector.detect(frame, scene.yolo_threshold)
                 if road_abnormal_mode == "mog":
                     foreground, next_frame_count = (
                         self._trained_mog_candidates_for_runtime(
@@ -1124,10 +1195,34 @@ class RoadAbnormalMonitor:
                             frame_count,
                         )
                     )
-                known = self._known_anomaly_candidates(known_objects, scene)
-                combined_candidates = [*known, *foreground]
             except Exception as exc:
-                inference_error = type(exc).__name__
+                foreground = []
+                next_frame_count = frame_count + 1
+                mog_error = "道路异常检测失败: " + type(exc).__name__
+
+            if (
+                road_abnormal_mode == "mog"
+                and foreground
+                and frame_count - known_objects_frame > 2
+            ):
+                try:
+                    known_objects = detector.detect(frame, detector_threshold)
+                    known_objects_frame = frame_count
+                    detected_this_frame = True
+                    detector_error = ""
+                except Exception as exc:
+                    detector_error = (
+                        "道路目标检测降级: " + type(exc).__name__
+                    )
+
+            if road_abnormal_mode == "mog" and detected_this_frame:
+                foreground = self._mog_candidates_not_covered_by_known_objects(
+                    foreground,
+                    known_objects,
+                )
+            known = self._known_anomaly_candidates(known_objects, scene)
+            combined_candidates = [*known, *foreground]
+            runtime_error = mog_error or detector_error
 
             with self._lock:
                 if (
@@ -1137,25 +1232,23 @@ class RoadAbnormalMonitor:
                     or self._scenes.get(scene_id) is not scene
                 ):
                     return frame
-                if inference_error:
-                    self._last_error = "道路异常检测失败: " + inference_error
-                else:
-                    self._known_objects = known_objects
-                    self._frame_count = next_frame_count
-                    try:
-                        height, width = frame.shape[:2]
-                        self.update_candidates(
-                            camera_id,
-                            combined_candidates,
-                            (width, height),
-                            frame=frame,
-                            now=observed_at,
-                            _pending_io=pending_candidate_io,
-                        )
-                        self._last_error = ""
-                    except Exception as exc:
-                        self._last_error = (
-                            "道路异常检测失败: " + type(exc).__name__
+                self._known_objects = known_objects
+                self._known_objects_frame = known_objects_frame
+                self._frame_count = next_frame_count
+                try:
+                    height, width = frame.shape[:2]
+                    self.update_candidates(
+                        camera_id,
+                        combined_candidates,
+                        (width, height),
+                        frame=frame,
+                        now=observed_at,
+                        _pending_io=pending_candidate_io,
+                    )
+                    self._last_error = runtime_error
+                except Exception as exc:
+                    self._last_error = (
+                        "道路异常检测失败: " + type(exc).__name__
                         )
                 overlay_candidates = [
                     {
